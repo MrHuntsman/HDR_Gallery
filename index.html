@@ -1,20 +1,61 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>HDR Gallery Test</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            background: #111;
-            color: #eee;
-            text-align: center;
-            padding-top: 50px;
-        }
-    </style>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HDR Gallery</title>
+    <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-    <h1>GitHub Pages is working!</h1>
-    <p>If you can read this, your site is live.</p>
+
+    <!-- HDR calibration tip — only shown on HDR-capable displays -->
+    <div id="hdrInfoBar" class="hdr-info-bar" style="display:none;">
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;opacity:0.7;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        <span><strong>HDR display detected</strong> — for accurate brightness <strong style="color:#fffd00;">set your Windows SDR brightness slider to 31% (203 nits)</strong> — Settings → System → Display → HDR → Display calibration → SDR content brightness.</span>
+    </div>
+
+    <!-- SDR warning — shown when HDR is not active -->
+    <div id="sdrInfoBar" class="hdr-info-bar hdr-info-bar-sdr" style="display:none;">
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        <span><strong>SDR display detected</strong> — Enable HDR in Windows Display Settings for accurate viewing.</span>
+    </div>
+
+    <div class="container">
+        <h1>HDR Gallery</h1>
+        <div class="upload-section">
+            <div class="drop-zone" id="dropZone">
+                <p class="drop-zone-text">Drop Images or Click Here</p>
+            </div>
+            <input id="fileInput" type="file" multiple accept=".png,.avif,.jxr,.exr,.hdr,.tiff,.tif,.heic,.heif" aria-label="Select HDR image files" style="display:none;" />
+        </div>
+        <div id="filterBar" class="filter-bar"></div>
+        <div id="statusMessage" class="status-message"></div>
+        <div class="gallery-section-header">
+            <span class="gallery-section-title">Latest uploads</span>
+        </div>
+        <div id="gallery" class="gallery"></div>
+    </div>
+
+    <script src="image-processing.js"></script>
+    <script src="script.js"></script>
+    <script>
+        const hdrMq = window.matchMedia('(dynamic-range: high)');
+
+        function updateHdrBars() {
+            const isHdr = hdrMq.matches;
+            document.getElementById('hdrInfoBar').style.display = isHdr ? 'flex' : 'none';
+            document.getElementById('sdrInfoBar').style.display = isHdr ? 'none' : 'flex';
+        }
+
+        updateHdrBars();
+        hdrMq.addEventListener('change', updateHdrBars);
+
+        let _lastHdr = hdrMq.matches;
+        setInterval(() => {
+            const isHdr = hdrMq.matches;
+            if (isHdr !== _lastHdr) { _lastHdr = isHdr; updateHdrBars(); }
+        }, 2000);
+    </script>
+
 </body>
 </html>
