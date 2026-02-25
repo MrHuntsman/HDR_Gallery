@@ -38,7 +38,7 @@ function generateBatchId() {
     return `batch_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-async function addImageFile(file, metadata = null, sdrBlob = null, hdrType = null, batchId = null, thumbBlob = null) {
+async function addImageFile(file, metadata = null, sdrBlob = null, hdrType = null, batchId = null, thumbBlob = null, gameName = null) {
     const database = await openDatabase();
     return new Promise((resolve, reject) => {
         const transaction = database.transaction(STORE_NAME, 'readwrite');
@@ -53,7 +53,7 @@ async function addImageFile(file, metadata = null, sdrBlob = null, hdrType = nul
             hdrType: hdrType,
             batchId: batchId,
             thumbBlob: thumbBlob,
-            gameName: null,
+            gameName: gameName,
         };
         const request = store.add(entry);
         
@@ -569,12 +569,13 @@ async function processFiles(selectedFiles) {
         return;
     }
 
-    // Show import modal — user picks HDR type before processing begins
-    const hdrType = await showImportModal(allowedFiles.length);
-    if (hdrType === null) {
+    // Show import modal — user picks HDR type and game name before processing begins
+    const importResult = await showImportModal(allowedFiles.length);
+    if (importResult === null) {
         fileInput.value = '';
         return; // User cancelled
     }
+    const { hdrType, gameName: importGameName } = importResult;
 
     const toConvert = allowedFiles.filter(needsConversion);
     const native = allowedFiles.filter(f => !needsConversion(f));
@@ -631,7 +632,7 @@ async function processFiles(selectedFiles) {
                 console.error('Thumbnail generation failed:', error);
             }
 
-            await addImageFile(file, metadata, sdrBlob, hdrType, batchId, thumbBlob);
+            await addImageFile(file, metadata, sdrBlob, hdrType, batchId, thumbBlob, importGameName);
         }
 
         fileInput.value = '';
@@ -1446,7 +1447,7 @@ function openLightbox(batchItems, startIndex) {
                 }
             });
             // Also update the toolbar center title which is set once on open
-            toolbarCenter.textContent = newGameName || 'Unknown Game';
+            imageHeaderTitle.textContent = newGameName || 'Unknown Game';
             try {
                 await updateImageHdrType(item.id, newHdrType);
                 if (item.batchId) await updateBatchGameName(item.batchId, newGameName);
@@ -2051,9 +2052,18 @@ function showImportModal(fileCount) {
         modal.innerHTML = `
             <div class="modal-header">
                 <span class="modal-title">${fileCount} image${fileCount === 1 ? '' : 's'} ready to import</span>
-                <span class="modal-subtitle">Select HDR type for this batch</span>
+                <span class="modal-subtitle">Set game name and HDR type for this batch</span>
             </div>
             <div class="modal-body">
+                <div class="modal-section-label">Game Name</div>
+                <div class="game-search-wrap">
+                    <div class="game-search-row">
+                        <svg class="game-search-icon" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                        <input class="game-search-input" type="text" placeholder="Search game…" autocomplete="off" />
+                    </div>
+                    <div class="game-search-results"></div>
+                </div>
+                <div class="modal-section-label modal-section-label-hdr">HDR Type</div>
                 <div class="hdr-type-grid" id="importHdrGrid"></div>
             </div>
             <div class="modal-footer">
@@ -2065,9 +2075,62 @@ function showImportModal(fileCount) {
         overlay.appendChild(modal);
         document.body.appendChild(overlay);
 
-        const grid = modal.querySelector('#importHdrGrid');
+        const grid        = modal.querySelector('#importHdrGrid');
+        const searchInput = modal.querySelector('.game-search-input');
+        const resultsEl   = modal.querySelector('.game-search-results');
+        const importBtn   = modal.querySelector('.modal-import');
+
         let selected = null;
-        const importBtn = modal.querySelector('.modal-import');
+        let selectedGameName = null;
+
+        // ── Game search ──
+        async function doSearch() {
+            const q = searchInput.value.trim();
+            if (!q) return;
+            resultsEl.innerHTML = '<div class="game-search-status">Searching…</div>';
+            resultsEl.style.display = 'flex';
+            try {
+                const results = await searchRawg(q);
+                resultsEl.innerHTML = '';
+                resultsEl.style.display = 'none';
+                if (results.length === 0) {
+                    resultsEl.innerHTML = '<div class="game-search-status">No results found</div>';
+                    resultsEl.style.display = 'flex';
+                    return;
+                }
+                results.forEach(game => {
+                    const item = document.createElement('div');
+                    item.className = 'game-result-item';
+                    item.textContent = game.name;
+                    if (game.released) item.textContent += ` (${game.released.slice(0, 4)})`;
+                    item.onclick = () => {
+                        selectedGameName = game.name;
+                        searchInput.value = game.name;
+                        resultsEl.innerHTML = '';
+                        resultsEl.style.display = 'none';
+                    };
+                    resultsEl.appendChild(item);
+                });
+                resultsEl.style.display = 'flex';
+            } catch (err) {
+                resultsEl.innerHTML = '<div class="game-search-status">Search failed</div>';
+                resultsEl.style.display = 'flex';
+            }
+        }
+
+        let debounceTimer = null;
+        searchInput.addEventListener('input', () => {
+            selectedGameName = searchInput.value.trim() || null;
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(doSearch, 350);
+        });
+        searchInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); clearTimeout(debounceTimer); doSearch(); }
+            if (e.key === 'Escape') { e.stopPropagation(); resultsEl.innerHTML = ''; resultsEl.style.display = 'none'; }
+        });
+        searchInput.addEventListener('blur', () => {
+            setTimeout(() => { resultsEl.innerHTML = ''; resultsEl.style.display = 'none'; }, 150);
+        });
 
         // Build grouped chips
         const groups = [...new Set(HDR_TYPES.map(t => t.group))];
@@ -2110,7 +2173,7 @@ function showImportModal(fileCount) {
         importBtn.onclick = () => {
             overlay.remove();
             document.removeEventListener('keydown', onImportKeydown, true);
-            resolve(selected);
+            resolve({ hdrType: selected, gameName: selectedGameName });
         };
 
         let importMousedownOnModal = false;
@@ -2134,6 +2197,9 @@ function showImportModal(fileCount) {
             }
         };
         document.addEventListener('keydown', onImportKeydown, true);
+
+        // Focus search input on open
+        requestAnimationFrame(() => searchInput.focus());
     });
 }
 
