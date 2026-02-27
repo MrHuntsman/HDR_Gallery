@@ -1,0 +1,29 @@
+· support multiple images
+
+· tags for resolution, ultrawide, nits, native/mod
+
+· brightness compensation for windows sdr slider
+
+
+Based on what we've worked through, here are the relevant SKIV source files:
+
+**`src/utility/image.cpp`** — the core of everything:
+- `SKIV_Image_Rec709toICtCp` / `SKIV_Image_ICtCptoRec709` — the ICtCp pipeline
+- `SKIV_Image_LinearToPQ` / `SKIV_Image_PQToLinear` / `SKIV_Image_LinearToPQY` — PQ EOTF/OETF
+- `SKIV_Image_TonemapToSDR` — the full SDR tonemap logic including histogram peak detection
+- `SKIV_Image_SaveToDisk_HDR` — HDR PNG encoding with cICP
+- The JXR/AVIF/PNG decode paths and primary conversion code
+
+**`src/tabs/viewer.cpp`** — gamut classification:
+- The `EvaluateImage` loop with the `rec_709 / dci_p3 / rec_2020 / ap1 / ap0` pixel counting
+- The `getPercentRec709` etc. percentage calculations
+- The 99.94th-percentile luminance histogram (also present in image.cpp but viewer.cpp has the gamut version)
+
+**`include/utility/image.h`** — all the matrices:
+- `c_from709to2020`, `c_from709toXYZ`, `c_fromXYZto709`
+- `c_from709toDCIP3`, `c_from709toAP0`, `c_from709toAP1`
+- `c_fromXYZtoLMS`, `c_fromLMStoXYZ`
+- `c_scRGBtoBt2100`, `c_Bt2100toscRGB`
+- The `ParamsPQ` struct with PQ constants
+
+The single most important thing to remember when reading `image.h` matrices: they're stored **transposed** relative to standard math convention (because SKIV uses `XMVector3Transform(v, M)` which is row-vector multiplication). Every matrix needs to be transposed before use in JS `mat3` which uses column-vector convention.

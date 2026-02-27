@@ -86,6 +86,21 @@ async function deleteImageFile(id) {
     });
 }
 
+async function deleteBatchImageFiles(ids) {
+    const database = await openDatabase();
+    return new Promise((resolve, reject) => {
+        const transaction = database.transaction(STORE_NAME, 'readwrite');
+        const store = transaction.objectStore(STORE_NAME);
+        let pending = ids.length;
+        if (pending === 0) { resolve(); return; }
+        ids.forEach(id => {
+            const req = store.delete(id);
+            req.onsuccess = () => { if (--pending === 0) resolve(); };
+            req.onerror  = () => reject(req.error);
+        });
+    });
+}
+
 async function updateImageMetadata(id, metadata) {
     const database = await openDatabase();
     return new Promise((resolve, reject) => {
@@ -196,7 +211,7 @@ let gameSearchQuery = '';
 
 // Supported formats
 const NATIVE_EXTENSIONS = ['.png'];                  // browser handles natively
-const CONVERT_EXTENSIONS = ['.avif', '.jxr', '.exr', '.hdr', '.tiff', '.tif', '.heic', '.heif'];
+const CONVERT_EXTENSIONS = ['.avif', '.jxr', '.exr', '.hdr'];
 const ALL_EXTENSIONS = [...NATIVE_EXTENSIONS, ...CONVERT_EXTENSIONS];
 
 // File validation
@@ -301,8 +316,13 @@ let lastCursorY = 0;
 document.addEventListener('mousemove', (e) => {
     lastCursorX = e.clientX;
     lastCursorY = e.clientY;
-    cursorTooltip.style.left = (e.clientX + 14) + 'px';
-    cursorTooltip.style.top  = (e.clientY + 14) + 'px';
+    const ttW = cursorTooltip.offsetWidth  || 140;
+    const ttH = cursorTooltip.offsetHeight || 80;
+    const gap = 14;
+    const tx = (e.clientX + gap + ttW > window.innerWidth)  ? e.clientX - ttW - gap : e.clientX + gap;
+    const ty = (e.clientY + gap + ttH > window.innerHeight) ? e.clientY - ttH - gap : e.clientY + gap;
+    cursorTooltip.style.left = tx + 'px';
+    cursorTooltip.style.top  = ty + 'px';
 });
 
 function revokeAllUrls() {
@@ -556,17 +576,34 @@ function stopVisibilityChecker() {
 // ─── File Processing ─────────────────────────────────────────────────────────
 
 async function processFiles(selectedFiles) {
-    const allowedFiles = selectedFiles.filter(isAllowedFile);
+    console.log("[processFiles] v2 running, files:", selectedFiles.map(f => f.name));
+    let allowedFiles = selectedFiles.filter(isAllowedFile);
     const rejectedFiles = selectedFiles.filter(file => !isAllowedFile(file));
 
     if (rejectedFiles.length) {
         const rejectedNames = rejectedFiles.map(f => f.name).join(', ');
-        alert(`Unsupported format(s): ${rejectedNames}\n\nSupported: PNG, AVIF, JXR, EXR, HDR, TIFF, HEIC`);
+        alert(`Unsupported format(s): ${rejectedNames}\n\nSupported: .png  .avif  .jxr  .exr  .hdr`);
     }
 
     if (allowedFiles.length === 0) {
         showStatusMessage('No valid files selected', 'error');
         return;
+    }
+
+    // ── SDR detection — runs before the import modal so the user is told immediately ──
+    const sdrFiles = await detectSdrFiles(allowedFiles);
+    if (sdrFiles.length > 0) {
+        const lines = sdrFiles.map(({ file, reason }) => `  • ${file.name} — ${reason}`).join('\n');
+        if (sdrFiles.length === allowedFiles.length) {
+            // Every file failed — abort entirely
+            alert(`No HDR images detected.\n\nAll selected files appear to be SDR:\n${lines}\n\nOnly HDR images are supported.`);
+            fileInput.value = '';
+            return;
+        } else {
+            // Some files failed — inform and continue with the rest
+            alert(`The following files were skipped because they appear to be SDR:\n${lines}`);
+            allowedFiles = allowedFiles.filter(f => !sdrFiles.some(r => r.file === f));
+        }
     }
 
     // Show import modal — user picks HDR type and game name before processing begins
@@ -580,65 +617,112 @@ async function processFiles(selectedFiles) {
     const toConvert = allowedFiles.filter(needsConversion);
     const native = allowedFiles.filter(f => !needsConversion(f));
 
+    // ── Per-step timing helpers ──────────────────────────────────────────────────
+    const _importT0 = performance.now();
+    function _importLog(label, startMs) {
+        const elapsed = (performance.now() - startMs).toFixed(0);
+        console.log(`[import] ${label}: ${elapsed} ms`);
+    }
+
     try {
         // Pre-load ImageMagick if any files need conversion
+        initProgress(allowedFiles.length, toConvert.length > 0);
+
         if (toConvert.length > 0) {
-            showProgress('Loading converter...');
-            await getMagick();
-        }
-
-        const finalFiles = [...native];
-
-        for (const file of toConvert) {
-            showProgress(`Converting ${file.name}`);
-            try {
-                const converted = await convertToPNG(file);
-                finalFiles.push(converted);
-            } catch (err) {
-                hideProgress();
-                showStatusMessage(`Failed to convert ${file.name}: ${err.message}`, 'error');
-                console.error('Conversion error:', err);
+            const needsMagick = toConvert.some(f => getFileExtension(f.name) !== '.jxr');
+            if (needsMagick) {
+                setProgressStep('convert', 'Loading converter…');
+                const _t = performance.now();
+                await getMagick();
+                _importLog('getMagick', _t);
             }
         }
-        hideProgress();
 
-        if (finalFiles.length === 0) {
-            showStatusMessage('No files could be processed', 'error');
-            return;
-        }
-
-        showStatusMessage(`Adding ${finalFiles.length} file${finalFiles.length === 1 ? '' : 's'}...`, 'info');
         const batchId = generateBatchId();
-        for (const file of finalFiles) {
-            // Extract metadata before storing
-            showProgress(`Processing metadata for ${file.name}`);
-            const metadata = await extractMetadataFromFile(file);
-            
-            // Generate SDR version
-            showProgress(`Generating SDR version for ${file.name}`);
-            let sdrBlob = null;
-            try {
-                sdrBlob = await convertToSDR(file, file.name);
-            } catch (error) {
-                console.error('SDR conversion failed:', error);
+        for (const file of allowedFiles) {
+            // Advance the unified file counter once, before any step is set for this file
+            advanceProgressFile();
+
+            let hdrFile = file;
+            let prebuiltSdr = null;
+            let prebuiltThumb = null;
+
+            // Convert to PNG first if needed
+            if (needsConversion(file)) {
+                setProgressStep('convert', file.name);
+                try {
+                    const _t = performance.now();
+                    const result = await convertToPNG(file);
+                    _importLog(`convertToPNG: ${file.name}`, _t);
+                    console.log('[convertToPNG processFiles] hdrFile:', result.hdrFile?.name, result.hdrFile?.size);
+                    console.log('[convertToPNG processFiles] sdrBlob:', result.sdrBlob?.constructor?.name, result.sdrBlob?.size);
+                    console.log('[convertToPNG processFiles] thumbBlob:', result.thumbBlob?.constructor?.name, result.thumbBlob?.size);
+                    hdrFile = result.hdrFile;
+                    prebuiltSdr = result.sdrBlob;
+                    prebuiltThumb = result.thumbBlob;
+                } catch (err) {
+                    hideProgress();
+                    showStatusMessage(`Failed to convert ${file.name}: ${err.message}`, 'error');
+                    console.error('Conversion error:', err);
+                    continue;
+                }
             }
 
-            // Generate HDR WebP thumbnail
-            showProgress(`Generating thumbnail for ${file.name}`);
-            let thumbBlob = null;
-            try {
-                thumbBlob = await generateThumb(file, 1280);
-            } catch (error) {
-                console.error('Thumbnail generation failed:', error);
+            setProgressStep('metadata', hdrFile.name);
+            const _tMeta = performance.now();
+            const metadata = await extractMetadataFromFile(hdrFile);
+            _importLog(`extractMetadata: ${hdrFile.name}`, _tMeta);
+
+
+            setProgressStep('analysing');
+            let sdrBlob = prebuiltSdr;
+            if (!sdrBlob) {
+                _progressFileLabel = `SDR tonemap: ${hdrFile.name}`;
+                _renderProgress();
+                const _t = performance.now();
+                try {
+                    sdrBlob = await convertToSDR(hdrFile, hdrFile.name);
+                    _importLog(`convertToSDR: ${hdrFile.name}`, _t);
+                    console.log('[processFiles] convertToSDR done:', sdrBlob?.size);
+                } catch (error) {
+                    console.error('SDR conversion failed:', error);
+                }
+            } else {
+                console.log('[processFiles] skipping convertToSDR, using prebuilt:', prebuiltSdr?.size);
             }
 
-            await addImageFile(file, metadata, sdrBlob, hdrType, batchId, thumbBlob, importGameName);
+
+            let thumbBlob = prebuiltThumb;
+            if (!thumbBlob) {
+                _progressFileLabel = `Thumbnail: ${hdrFile.name}`;
+                _renderProgress();
+                const _t = performance.now();
+                try {
+                    thumbBlob = await generateThumb(hdrFile, 1280);
+                    _importLog(`generateThumb: ${hdrFile.name}`, _t);
+                    console.log('[processFiles] generateThumb done:', thumbBlob?.size);
+                } catch (error) {
+                    console.error('Thumbnail generation failed:', error);
+                }
+            } else {
+                console.log('[processFiles] skipping generateThumb, using prebuilt thumb:', prebuiltThumb?.size);
+            }
+
+
+            _progressFileLabel = `Saving: ${hdrFile.name}`;
+            _renderProgress();
+            const _tSave = performance.now();
+            console.log('[processFiles] storing — thumb:', thumbBlob?.size, 'sdr:', sdrBlob?.size);
+            await addImageFile(hdrFile, metadata, sdrBlob, hdrType, batchId, thumbBlob, importGameName);
+            _importLog(`addImageFile: ${hdrFile.name}`, _tSave);
         }
+        _importLog('total import', _importT0);
 
         fileInput.value = '';
+        hideProgress();
         await refreshGallery();
-        showStatusMessage(`Successfully added ${finalFiles.length} image${finalFiles.length === 1 ? '' : 's'}`, 'success');
     } catch (error) {
+        hideProgress();
         showStatusMessage('Failed to process files: ' + error.message, 'error');
         console.error('Process files error:', error);
     }
@@ -681,7 +765,7 @@ function buildGalleryCards(allItems) {
         galleryContainer.appendChild(card);
     }
 
-    statusMessage.textContent = `Found ${allItems.length} image${allItems.length === 1 ? '' : 's'}`;
+    // statusMessage.textContent = `Found ${allItems.length} image${allItems.length === 1 ? '' : 's'}`;
 }
 
 // Detach/re-attach cards to match the current search query.
@@ -709,9 +793,7 @@ function renderGallery(allItems) {
     }
     galleryContainer.appendChild(fragment);
 
-    statusMessage.textContent = visibleCount === allItems.length
-        ? `Found ${allItems.length} image${allItems.length === 1 ? '' : 's'}`
-        : `Found ${visibleCount} of ${allItems.length} image${allItems.length === 1 ? '' : 's'}`;
+    // status message disabled
 }
 
 async function refreshGallery() {
@@ -767,6 +849,7 @@ function createCollageCard(batchItems) {
         const displayBlob = (item.thumbBlob instanceof Blob)
             ? item.thumbBlob
             : blob;
+    
         const url = URL.createObjectURL(displayBlob);
         createdUrls.push(url);
 
@@ -793,7 +876,7 @@ function createCollageCard(batchItems) {
     const hdrTypeDef = HDR_TYPES.find(t => t.id === hdrTypeId);
     let hdrLabel = null;
     let hdrClass = '';
-    if (hdrTypeDef) {
+    if (hdrTypeDef && hdrTypeId !== 'unknown') {
         hdrLabel = hdrTypeDef.label;
         hdrClass = `collage-hdr-type--${hdrTypeId}`;
     } else if (!hdrTypeId) {
@@ -822,6 +905,7 @@ let lightboxPixelBuffers = new Map(); // imageId → buffer promise
 let lightboxIsZooming = false;
 let lightboxZoomScale = CONFIG.zoomScale;
 let lightboxSdrActive = false;
+let lightboxSdrToggleActive = false; // full SDR view (no slider)
 
 function openLightbox(batchItems, startIndex) {
     if (lightboxOpen) closeLightbox();
@@ -842,7 +926,13 @@ function openLightbox(batchItems, startIndex) {
         const displayBlob = (item.thumbBlob instanceof Blob) ? item.thumbBlob : blob;
         const displayUrl = displayBlob === blob ? fullUrl : URL.createObjectURL(displayBlob);
         if (displayBlob !== blob) lightboxCreatedUrls.push(displayUrl);
-        lightboxBlobUrls.set(item.id, { url: displayUrl, fullUrl, blob });
+        // SDR URL — pre-created so the toggle is instant, no DB fetch on click
+        let sdrUrl = null;
+        if (item.sdrBlob instanceof Blob) {
+            sdrUrl = URL.createObjectURL(item.sdrBlob);
+            lightboxCreatedUrls.push(sdrUrl);
+        }
+        lightboxBlobUrls.set(item.id, { url: displayUrl, fullUrl, blob, sdrUrl });
     });
 
     // Pre-decode pixel buffers for all images in batch
@@ -864,9 +954,31 @@ function openLightbox(batchItems, startIndex) {
     overlay.id = 'lightbox-overlay';
     overlay.className = 'lightbox-overlay';
 
+    // Track whether mousedown started inside interactive content (IMO panel, SDR slider, etc.)
+    // so that a drag released outside doesn't fire a spurious close click.
+    let _mousedownInsideContent = false;
+    // Expose a setter so child handlers that call stopPropagation (e.g. IMO panel drag)
+    // can still mark the flag — call overlay._setMousedownInsideContent(true) from there.
+    overlay._setMousedownInsideContent = (val) => { _mousedownInsideContent = val; };
+    overlay.addEventListener('mousedown', (e) => {
+        // Consider any target that isn't the bare overlay/imageArea/filmstrip/toolbar as "inside content"
+        _mousedownInsideContent = (
+            e.target !== overlay &&
+            e.target !== imageArea &&
+            e.target !== filmstrip &&
+            e.target !== toolbar &&
+            e.target !== toolbarLeft &&
+            e.target !== toolbarRight
+        );
+    });
+
     // Close on backdrop click — fires when clicking empty black areas.
     // Nav buttons use pointer-events:none when inactive so we check by position too.
     overlay.addEventListener('click', (e) => {
+        // If mousedown started inside interactive content (drag released outside), ignore
+        if (_mousedownInsideContent) { _mousedownInsideContent = false; return; }
+        _mousedownInsideContent = false;
+
         const inPrev = isInsideRect(e.clientX, e.clientY, prevBtn.getBoundingClientRect());
         const inNext = isInsideRect(e.clientX, e.clientY, nextBtn.getBoundingClientRect());
         if (inPrev || inNext) return;
@@ -994,9 +1106,19 @@ function openLightbox(batchItems, startIndex) {
     compareBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 6H3"/><path d="m7 12-4-4 4-4"/><path d="M3 18h18"/><path d="m17 12 4 4-4 4"/></svg> <u>S</u>DR Slider';
     toolbarCenter.appendChild(compareBtn);
 
+    const sdrToggleBtn = document.createElement('button');
+    sdrToggleBtn.className = 'button-secondary';
+    sdrToggleBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg> SDR Toggle';
+    toolbarCenter.appendChild(sdrToggleBtn);
+
     const saveBtn = document.createElement('button');
     saveBtn.className = 'button-secondary';
-    saveBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Save';
+    saveBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Save HDR Image';
+
+    function updateSaveBtn() {
+        const isSdr = lightboxSdrToggleActive;
+        saveBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Save ${isSdr ? 'SDR' : 'HDR'} Image`;
+    }
     toolbarCenter.appendChild(saveBtn);
 
     const editBtn = document.createElement('button');
@@ -1008,6 +1130,13 @@ function openLightbox(batchItems, startIndex) {
     deleteBtn.className = 'button-danger';
     deleteBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg> Delete';
     toolbarCenter.appendChild(deleteBtn);
+
+    const deleteAllBtn = document.createElement('button');
+    deleteAllBtn.className = 'button-danger';
+    deleteAllBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg> Delete All';
+    // Only show if batch has more than one image
+    deleteAllBtn.style.display = lightboxBatch.length > 1 ? '' : 'none';
+    toolbarCenter.appendChild(deleteAllBtn);
 
     // ── Hold-to-zoom ──
     let isZooming = false;
@@ -1257,6 +1386,57 @@ function openLightbox(batchItems, startIndex) {
 
     let lbMouseInside = false;
 
+    // ── Zoom-aware cursor → pixel coordinate mapping ──
+    // When zoomed, imgEl is position:fixed full-viewport with object-fit:contain,
+    // so getBoundingClientRect() returns the whole viewport, not the actual image rect.
+    // We must compute the letterboxed image rect manually and then invert the
+    // translate(panX%, panY%) scale(scrollZoomCurrent) transform.
+    function cursorToPixel(clientX, clientY, buf) {
+        const natW = imgEl.naturalWidth  || buf.width;
+        const natH = imgEl.naturalHeight || buf.height;
+
+        if (imgEl.classList.contains('lightbox-image-zooming')) {
+            const vw = window.innerWidth;
+            const vh = window.innerHeight;
+
+            // Step 1: compute the un-zoomed letterboxed rect (object-fit:contain inside viewport)
+            const fitScale = Math.min(vw / natW, vh / natH);
+            const fitW = natW * fitScale;
+            const fitH = natH * fitScale;
+            const fitLeft = (vw - fitW) / 2;
+            const fitTop  = (vh - fitH) / 2;
+
+            // Step 2: invert the CSS transform: translate(panX%, panY%) scale(scrollZoomCurrent)
+            // The transform origin is 50% 50% of the viewport.
+            // A point P in viewport space maps to image space as:
+            //   P_img = (P_viewport - viewport_centre - pan_px) / scrollZoomCurrent + viewport_centre
+            // where pan_px = panX/100 * vw, panY/100 * vh
+            const cx = vw / 2;
+            const cy = vh / 2;
+            const panPxX = (panX / 100) * vw;
+            const panPxY = (panY / 100) * vh;
+
+            const unscaledX = (clientX - cx - panPxX) / scrollZoomCurrent + cx;
+            const unscaledY = (clientY - cy - panPxY) / scrollZoomCurrent + cy;
+
+            // Step 3: map from viewport coords back to pixel coords via the fit rect
+            const imgX = Math.floor((unscaledX - fitLeft) * (natW / fitW));
+            const imgY = Math.floor((unscaledY - fitTop)  * (natH / fitH));
+
+            return {
+                imgX: Math.max(0, Math.min(natW - 1, imgX)),
+                imgY: Math.max(0, Math.min(natH - 1, imgY)),
+            };
+        } else {
+            // Not zoomed — simple mapping via getBoundingClientRect()
+            const rect = imgEl.getBoundingClientRect();
+            return {
+                imgX: Math.max(0, Math.min(natW - 1, Math.floor((clientX - rect.left) * (natW / rect.width)))),
+                imgY: Math.max(0, Math.min(natH - 1, Math.floor((clientY - rect.top)  * (natH / rect.height)))),
+            };
+        }
+    }
+
     imgEl.addEventListener('mouseenter', async () => {
         lbMouseInside = true;
         if (!imageWrapper.querySelector('.inline-comparison-slider')) {
@@ -1269,6 +1449,7 @@ function openLightbox(batchItems, startIndex) {
             }
         }
         if (!globalDetailsEnabled) return;
+        if (lightboxSdrActive) return;
         if (!lbPixelBuffer) {
             const item = lightboxBatch[lightboxIndex];
             const bufPromise = lightboxPixelBuffers.get(item.id);
@@ -1276,13 +1457,14 @@ function openLightbox(batchItems, startIndex) {
         }
         if (!lbPixelBuffer || !lbMouseInside || !globalDetailsEnabled) return;
         nitTooltip.style.display = 'block';
-        const rect = imgEl.getBoundingClientRect();
-        const imgX = Math.floor((lastCursorX - rect.left) * (lbPixelBuffer.width  / rect.width));
-        const imgY = Math.floor((lastCursorY - rect.top)  * (lbPixelBuffer.height / rect.height));
+        const { imgX, imgY } = cursorToPixel(lastCursorX, lastCursorY, lbPixelBuffer);
         lbLastPixelX = imgX; lbLastPixelY = imgY;
-        const { rNits, gNits, bNits, luminance } = getNitsAtPixel(lbPixelBuffer, imgX, imgY);
+        const { rNits, gNits, bNits, luminance, gamut } = getNitsAtPixel(lbPixelBuffer, imgX, imgY);
         const fmt = v => v < 10 ? v.toFixed(2) : Math.round(v);
-        nitTooltip.innerHTML = `<div style="display:grid;grid-template-columns:auto auto auto;gap:0 4px;align-items:baseline;"><span>Nits</span><span>:</span><span style="text-align:right;">${fmt(luminance)}</span><span style="color:#ff6b6b;">R</span><span style="color:#ff6b6b;">:</span><span style="text-align:right;color:#ff6b6b;">${fmt(rNits)}</span><span style="color:#51cf66;">G</span><span style="color:#51cf66;">:</span><span style="text-align:right;color:#51cf66;">${fmt(gNits)}</span><span style="color:#4dabf7;">B</span><span style="color:#4dabf7;">:</span><span style="text-align:right;color:#4dabf7;">${fmt(bNits)}</span></div>`;
+        nitTooltip.innerHTML = (() => {
+                            const gamutColor = gamut === 'BT.2020' ? '#f472b6' : gamut === 'DCI-P3' ? '#34d399' : '#60a5fa';
+                            return `<div style="display:grid;grid-template-columns:auto auto minmax(3.5em,auto);gap:0 4px;align-items:baseline;"><span>Nits</span><span>:</span><span style="text-align:right;">${fmt(luminance)}</span><span style="color:#ff6b6b;">R</span><span style="color:#ff6b6b;">:</span><span style="text-align:right;color:#ff6b6b;">${fmt(rNits)}</span><span style="color:#51cf66;">G</span><span style="color:#51cf66;">:</span><span style="text-align:right;color:#51cf66;">${fmt(gNits)}</span><span style="color:#4dabf7;">B</span><span style="color:#4dabf7;">:</span><span style="text-align:right;color:#4dabf7;">${fmt(bNits)}</span><span style="color:${gamutColor};margin-top:3px;grid-column:1/-1;border-top:1px solid rgba(255,255,255,0.08);padding-top:3px;">${gamut}</span></div>`;
+                        })();
     });
     imgEl.addEventListener('mouseleave', () => {
         lbMouseInside = false;
@@ -1291,18 +1473,19 @@ function openLightbox(batchItems, startIndex) {
     });
     imgEl.addEventListener('mousemove', (e) => {
         if (!lbPixelBuffer || !globalDetailsEnabled) return;
-        if (lbRafPending) return;
+        if (lightboxSdrActive) return;
         lbRafPending = true;
         requestAnimationFrame(() => {
             lbRafPending = false;
-            const rect = imgEl.getBoundingClientRect();
-            const imgX = Math.floor((e.clientX - rect.left) * (lbPixelBuffer.width  / rect.width));
-            const imgY = Math.floor((e.clientY - rect.top)  * (lbPixelBuffer.height / rect.height));
+            const { imgX, imgY } = cursorToPixel(e.clientX, e.clientY, lbPixelBuffer);
             if (imgX === lbLastPixelX && imgY === lbLastPixelY) return;
             lbLastPixelX = imgX; lbLastPixelY = imgY;
-            const { rNits, gNits, bNits, luminance } = getNitsAtPixel(lbPixelBuffer, imgX, imgY);
+            const { rNits, gNits, bNits, luminance, gamut } = getNitsAtPixel(lbPixelBuffer, imgX, imgY);
             const fmt = v => v < 10 ? v.toFixed(2) : Math.round(v);
-            nitTooltip.innerHTML = `<div style="display:grid;grid-template-columns:auto auto auto;gap:0 4px;align-items:baseline;"><span>Nits</span><span>:</span><span style="text-align:right;">${fmt(luminance)}</span><span style="color:#ff6b6b;">R</span><span style="color:#ff6b6b;">:</span><span style="text-align:right;color:#ff6b6b;">${fmt(rNits)}</span><span style="color:#51cf66;">G</span><span style="color:#51cf66;">:</span><span style="text-align:right;color:#51cf66;">${fmt(gNits)}</span><span style="color:#4dabf7;">B</span><span style="color:#4dabf7;">:</span><span style="text-align:right;color:#4dabf7;">${fmt(bNits)}</span></div>`;
+            nitTooltip.innerHTML = (() => {
+                            const gamutColor = gamut === 'BT.2020' ? '#f472b6' : gamut === 'DCI-P3' ? '#34d399' : '#60a5fa';
+                            return `<div style="display:grid;grid-template-columns:auto auto minmax(3.5em,auto);gap:0 4px;align-items:baseline;"><span>Nits</span><span>:</span><span style="text-align:right;">${fmt(luminance)}</span><span style="color:#ff6b6b;">R</span><span style="color:#ff6b6b;">:</span><span style="text-align:right;color:#ff6b6b;">${fmt(rNits)}</span><span style="color:#51cf66;">G</span><span style="color:#51cf66;">:</span><span style="text-align:right;color:#51cf66;">${fmt(gNits)}</span><span style="color:#4dabf7;">B</span><span style="color:#4dabf7;">:</span><span style="text-align:right;color:#4dabf7;">${fmt(bNits)}</span><span style="color:${gamutColor};margin-top:3px;grid-column:1/-1;border-top:1px solid rgba(255,255,255,0.08);padding-top:3px;">${gamut}</span></div>`;
+                        })();
         });
     });
 
@@ -1335,6 +1518,11 @@ function openLightbox(batchItems, startIndex) {
         compareBtn.classList.remove('button-active');
         compareBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 6H3"/><path d="m7 12-4-4 4-4"/><path d="M3 18h18"/><path d="m17 12 4 4-4 4"/></svg> <u>S</u>DR Slider';
 
+        // Reset SDR full-view toggle
+        lightboxSdrToggleActive = false;
+        sdrToggleBtn.classList.remove('button-active');
+        updateSaveBtn();
+
         // Remove existing details overlay
         const existingOverlay = imageWrapper.querySelector('.image-meta-overlay');
         if (existingOverlay) existingOverlay.remove();
@@ -1366,7 +1554,7 @@ function openLightbox(batchItems, startIndex) {
         const hdrTypeDef = HDR_TYPES.find(t => t.id === item.hdrType);
         let lbHdrLabel = null;
         let lbHdrClass = '';
-        if (hdrTypeDef) {
+        if (hdrTypeDef && item.hdrType !== 'unknown') {
             lbHdrLabel = hdrTypeDef.label;
             lbHdrClass = `collage-hdr-type--${item.hdrType}`;
         } else if (!item.hdrType) {
@@ -1397,13 +1585,14 @@ function openLightbox(batchItems, startIndex) {
             lbPixelBuffer = buf;
             if (lbMouseInside && globalDetailsEnabled && buf) {
                 nitTooltip.style.display = 'block';
-                const rect = imgEl.getBoundingClientRect();
-                const imgX = Math.floor((lastCursorX - rect.left) * (buf.width  / rect.width));
-                const imgY = Math.floor((lastCursorY - rect.top)  * (buf.height / rect.height));
+                const { imgX, imgY } = cursorToPixel(lastCursorX, lastCursorY, buf);
                 lbLastPixelX = imgX; lbLastPixelY = imgY;
-                const { rNits, gNits, bNits, luminance } = getNitsAtPixel(buf, imgX, imgY);
+                const { rNits, gNits, bNits, luminance, gamut } = getNitsAtPixel(buf, imgX, imgY);
                 const fmt = v => v < 10 ? v.toFixed(2) : Math.round(v);
-                nitTooltip.innerHTML = `<div style="display:grid;grid-template-columns:auto auto auto;gap:0 4px;align-items:baseline;"><span>Nits</span><span>:</span><span style="text-align:right;">${fmt(luminance)}</span><span style="color:#ff6b6b;">R</span><span style="color:#ff6b6b;">:</span><span style="text-align:right;color:#ff6b6b;">${fmt(rNits)}</span><span style="color:#51cf66;">G</span><span style="color:#51cf66;">:</span><span style="text-align:right;color:#51cf66;">${fmt(gNits)}</span><span style="color:#4dabf7;">B</span><span style="color:#4dabf7;">:</span><span style="text-align:right;color:#4dabf7;">${fmt(bNits)}</span></div>`;
+                nitTooltip.innerHTML = (() => {
+                            const gamutColor = gamut === 'BT.2020' ? '#f472b6' : gamut === 'DCI-P3' ? '#34d399' : '#60a5fa';
+                            return `<div style="display:grid;grid-template-columns:auto auto minmax(3.5em,auto);gap:0 4px;align-items:baseline;"><span>Nits</span><span>:</span><span style="text-align:right;">${fmt(luminance)}</span><span style="color:#ff6b6b;">R</span><span style="color:#ff6b6b;">:</span><span style="text-align:right;color:#ff6b6b;">${fmt(rNits)}</span><span style="color:#51cf66;">G</span><span style="color:#51cf66;">:</span><span style="text-align:right;color:#51cf66;">${fmt(gNits)}</span><span style="color:#4dabf7;">B</span><span style="color:#4dabf7;">:</span><span style="text-align:right;color:#4dabf7;">${fmt(bNits)}</span><span style="color:${gamutColor};margin-top:3px;grid-column:1/-1;border-top:1px solid rgba(255,255,255,0.08);padding-top:3px;">${gamut}</span></div>`;
+                        })();
             }
         });
 
@@ -1419,13 +1608,31 @@ function openLightbox(batchItems, startIndex) {
         // Wire up action buttons for current item
         saveBtn.onclick = async () => {
             try {
+                const isSdr = lightboxSdrToggleActive;
+                const { sdrUrl, fullUrl, blob } = lightboxBlobUrls.get(item.id);
+                const saveBlob = isSdr && item.sdrBlob instanceof Blob ? item.sdrBlob : blob;
+                const saveBlobUrl = isSdr && sdrUrl ? sdrUrl : fullUrl;
+                const dotIdx = item.name.lastIndexOf('.');
+                const base = dotIdx >= 0 ? item.name.slice(0, dotIdx) : item.name;
+                const ext  = dotIdx >= 0 ? item.name.slice(dotIdx).toLowerCase() : '';
+                const suffix = isSdr ? '_SDR' : '_HDR';
+                const saveExt = isSdr ? '.png' : ext;
+                const saveName = base + suffix + saveExt;
                 if (window.showSaveFilePicker) {
-                    const fh = await window.showSaveFilePicker({ suggestedName: item.name });
+                    const EXT_TYPES = {
+                        '.png':  [{ description: 'PNG Image',            accept: { 'image/png':  ['.png']  } }],
+                        '.avif': [{ description: 'AVIF Image',           accept: { 'image/avif': ['.avif'] } }],
+                        '.jxr':  [{ description: 'JPEG XR Image',        accept: { 'image/jxr':  ['.jxr']  } }],
+                        '.exr':  [{ description: 'OpenEXR Image',        accept: { 'image/x-exr': ['.exr'] } }],
+                        '.hdr':  [{ description: 'Radiance HDR Image',   accept: { 'image/vnd.radiance': ['.hdr'] } }],
+                    };
+                    const types = EXT_TYPES[saveExt];
+                    const fh = await window.showSaveFilePicker({ suggestedName: saveName, ...(types ? { types, excludeAcceptAllOption: true } : {}) });
                     const w = await fh.createWritable();
-                    await w.write(blob);
+                    await w.write(saveBlob);
                     await w.close();
                 } else {
-                    downloadFile(fullUrl, item.name);
+                    downloadFile(saveBlobUrl, saveName);
                 }
             } catch (err) {
                 if (err.name !== 'AbortError') console.error('Save error:', err);
@@ -1482,7 +1689,38 @@ function openLightbox(batchItems, startIndex) {
             } catch (err) { console.error('Delete error:', err); }
         };
 
-        compareBtn.onclick = async () => {
+        deleteAllBtn.onclick = async () => {
+            const count = lightboxBatch.length;
+            const gameName = lightboxBatch[0]?.gameName || 'this batch';
+            if (!confirm(`Delete all ${count} image${count === 1 ? '' : 's'} from "${gameName}"?`)) return;
+            try {
+                const ids = lightboxBatch.map(b => b.id);
+                await deleteBatchImageFiles(ids);
+                // Revoke all lightbox URLs for the batch
+                ids.forEach(id => {
+                    const entry = lightboxBlobUrls.get(id);
+                    if (entry) {
+                        URL.revokeObjectURL(entry.fullUrl);
+                        if (entry.url !== entry.fullUrl) URL.revokeObjectURL(entry.url);
+                        lightboxCreatedUrls = lightboxCreatedUrls.filter(u => u !== entry.fullUrl && u !== entry.url);
+                        lightboxBlobUrls.delete(id);
+                    }
+                    lightboxPixelBuffers.delete(id);
+                });
+                closeLightbox();
+                await refreshGallery();
+            } catch (err) { console.error('Delete all error:', err); }
+        };
+
+        compareBtn.onclick = () => {
+            // Close full SDR view if active — the two modes are mutually exclusive
+            if (lightboxSdrToggleActive) {
+                const { fullUrl } = lightboxBlobUrls.get(item.id);
+                imgEl.src = fullUrl;
+                lightboxSdrToggleActive = false;
+                sdrToggleBtn.classList.remove('button-active');
+            }
+
             const existingSlider = imageWrapper.querySelector('.inline-comparison-slider');
             if (existingSlider) {
                 if (existingSlider._cleanup) existingSlider._cleanup();
@@ -1490,18 +1728,13 @@ function openLightbox(batchItems, startIndex) {
                 lightboxSdrActive = false;
                 compareBtn.classList.remove('button-active');
                 compareBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 6H3"/><path d="m7 12-4-4 4-4"/><path d="M3 18h18"/><path d="m17 12 4 4-4 4"/></svg> <u>S</u>DR Slider';
+                // Restore analysis overlay and nit tooltip
+                const metaOverlay = imageWrapper.querySelector('.image-meta-overlay');
+                if (metaOverlay) metaOverlay.style.visibility = '';
                 return;
             }
-            const db = await openDatabase();
-            const fresh = await new Promise((res, rej) => {
-                const tx = db.transaction(STORE_NAME, 'readonly');
-                const req = tx.objectStore(STORE_NAME).get(item.id);
-                req.onsuccess = () => res(req.result);
-                req.onerror  = () => rej(req.error);
-            });
-            if (fresh?.sdrBlob) {
-                const sdrUrl = URL.createObjectURL(fresh.sdrBlob);
-                lightboxCreatedUrls.push(sdrUrl);
+            const { sdrUrl } = lightboxBlobUrls.get(item.id);
+            if (sdrUrl) {
 
                 const slider = document.createElement('div');
                 slider.className = 'inline-comparison-slider lightbox-comparison-slider';
@@ -1643,11 +1876,55 @@ function openLightbox(batchItems, startIndex) {
 
                 lightboxSdrActive = true;
                 compareBtn.classList.add('button-active');
+                // Hide analysis overlay and nit tooltip while SDR slider is active
+                const metaOverlay = imageWrapper.querySelector('.image-meta-overlay');
+                if (metaOverlay) metaOverlay.style.visibility = 'hidden';
+                nitTooltip.style.display = 'none';
+                _nitsRow.style.display = 'none';
             } else {
                 showStatusMessage('SDR version not available', 'error');
             }
         };
-    }
+
+        sdrToggleBtn.onclick = () => {
+            // Close the slider if it's open — the two modes are mutually exclusive
+            const existingSlider = imageWrapper.querySelector('.inline-comparison-slider');
+            if (existingSlider) {
+                if (existingSlider._cleanup) existingSlider._cleanup();
+                existingSlider.remove();
+                lightboxSdrActive = false;
+                compareBtn.classList.remove('button-active');
+                compareBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 6H3"/><path d="m7 12-4-4 4-4"/><path d="M3 18h18"/><path d="m17 12 4 4-4 4"/></svg> <u>S</u>DR Slider';
+            }
+
+            if (lightboxSdrToggleActive) {
+                // Switch back to HDR
+                const { fullUrl } = lightboxBlobUrls.get(item.id);
+                imgEl.src = fullUrl;
+                lightboxSdrToggleActive = false;
+                sdrToggleBtn.classList.remove('button-active');
+                updateSaveBtn();
+                const metaOverlay = imageWrapper.querySelector('.image-meta-overlay');
+                if (metaOverlay) metaOverlay.style.visibility = '';
+                return;
+            }
+
+            const { sdrUrl } = lightboxBlobUrls.get(item.id);
+            if (sdrUrl) {
+                imgEl.src = sdrUrl;
+                lightboxSdrToggleActive = true;
+                sdrToggleBtn.classList.add('button-active');
+                updateSaveBtn();
+                // Hide analysis overlay while SDR view is active
+                const metaOverlay = imageWrapper.querySelector('.image-meta-overlay');
+                if (metaOverlay) metaOverlay.style.visibility = 'hidden';
+                nitTooltip.style.display = 'none';
+                _nitsRow.style.display = 'none';
+            } else {
+                showStatusMessage('SDR version not available', 'error');
+            }
+        };
+    } // end renderLightboxImage
 
     // ── Filmstrip builder ──
     function rebuildFilmstrip() {
@@ -1696,6 +1973,7 @@ function closeLightbox() {
     lightboxBatch = [];
     lightboxIndex = 0;
     lightboxPixelBuffer = null;
+    lightboxSdrToggleActive = false;
     _lightboxRender = null;
     globalDetailsEnabled = false;
     nitTooltip.style.display = 'none';
@@ -1726,19 +2004,109 @@ function downloadFile(url, filename) {
     anchor.remove();
 }
 
-function showProgress(label = '') {
-    statusMessage.innerHTML = `
-        <div class="progress-label">${label}</div>
-        <div class="progress-dots">
-            <div class="progress-dot"></div>
-            <div class="progress-dot"></div>
-            <div class="progress-dot"></div>
-        </div>
-    `;
+// ─── Step Progress Bar ────────────────────────────────────────────────────────
+
+let _progressSteps = [];
+let _progressCurrentStep = -1;
+let _progressFileLabel = '';
+let _progressFileIndex = 0;
+let _progressFileTotal = 0;
+
+// Define the step sequence. conversionNeeded adds extra steps at the front.
+function initProgress(fileTotal, conversionNeeded) {
+    _progressFileTotal = fileTotal;
+    _progressFileIndex = 0;
+    _progressSteps = [
+        ...(conversionNeeded ? [{ id: 'convert', label: 'Convert' }] : []),
+        { id: 'metadata',  label: 'Metadata'  },
+        { id: 'analysing', label: 'Analysing' },
+    ];
+    _progressCurrentStep = -1;
+    _progressFileLabel = '';
+    _renderProgress();
+}
+
+
+// advanceProgressFile() must be called exactly once per file, before setProgressStep.
+// Passing the call through here rather than inferring it from counter state avoids
+// the ambiguity that arises with mixed native/converted batches.
+function advanceProgressFile() {
+    _progressFileIndex++;
+}
+
+function setProgressStep(stepId, fileName) {
+    _progressCurrentStep = _progressSteps.findIndex(s => s.id === stepId);
+    if (fileName !== undefined) _progressFileLabel = fileName;
+    _renderProgress();
+}
+
+// Legacy thin wrapper — called by old conversion code
+function showProgress(label) {
+    if (label.startsWith('Loading converter') || label.startsWith('Converting')) {
+        const fileName = label.startsWith('Converting') ? label.replace('Converting ', '') : '';
+        setProgressStep('convert', fileName);
+    } else if (label.startsWith('Processing metadata')) {
+        setProgressStep('metadata', label.replace('Processing metadata for ', ''));
+    } else if (label.startsWith('Generating SDR') || label.startsWith('Generating thumbnail')) {
+        setProgressStep('analysing');
+    } else {
+        _progressFileLabel = label;
+        _renderProgress();
+    }
 }
 
 function hideProgress() {
     statusMessage.innerHTML = '';
+    _progressSteps = [];
+    _progressCurrentStep = -1;
+}
+
+function _renderProgress() {
+    if (_progressSteps.length === 0) return;
+
+    const total = _progressFileTotal || 1;
+    const currentStepId = _progressCurrentStep >= 0 ? _progressSteps[_progressCurrentStep]?.id : null;
+
+    // _progressFileIndex is the single counter (1-based), advanced once per file
+    // via advanceProgressFile() before any step is set for that file.
+    const activeFileNum = _progressFileIndex;
+    const effectiveActiveIdx = Math.max(0, activeFileNum - 1);
+    const hasActive = activeFileNum > 0;
+
+    const segments = Array.from({ length: total }, (_, i) => {
+        let cls = '';
+        if (hasActive && i < effectiveActiveIdx) cls = 'seg-done';
+        else if (hasActive && i === effectiveActiveIdx) cls = 'seg-active';
+        return `<div class="import-progress-segment ${cls}"></div>`;
+    }).join('');
+    const counter = total > 1
+        ? `<span class="import-progress-counter"><em>${activeFileNum}</em> / ${total}</span>`
+        : '';
+
+    // Main label: derive a human-readable description from current step + file label.
+    let mainLabel = 'Processing\u2026';
+    if (currentStepId === 'convert') {
+        mainLabel = _progressFileLabel === 'Loading converter\u2026' ? 'Loading converter\u2026' : `Converting\u2026`;
+    } else if (currentStepId === 'metadata') {
+        mainLabel = 'Reading metadata\u2026';
+    } else if (currentStepId === 'analysing') {
+        if (_progressFileLabel.startsWith('SDR tonemap'))      mainLabel = 'Generating SDR version\u2026';
+        else if (_progressFileLabel.startsWith('Thumbnail'))   mainLabel = 'Generating thumbnail\u2026';
+        else if (_progressFileLabel.startsWith('Saving'))      mainLabel = 'Saving\u2026';
+        else                                                    mainLabel = 'Analysing\u2026';
+    }
+
+    statusMessage.innerHTML = `
+        <div class="import-progress">
+            <div class="import-progress-row">
+                <div class="import-progress-spinner"></div>
+                <span class="import-progress-label">${mainLabel}</span>
+                <div class="import-progress-spacer"></div>
+                ${counter}
+            </div>
+            <div class="import-progress-segments">${segments}</div>
+        </div>
+    `;
 }
 
 function showStatusMessage(message, type = 'info') {
@@ -1965,13 +2333,19 @@ function showMetadataOverlay(filename, metadata, imageWrapper) {
         if (imoPanelPositions.single) {
             const saved = imoPanelPositions.single;
             const pRect = panel.getBoundingClientRect();
-            const l = Math.max(minLeft, Math.min(minLeft + bRect.width  - pRect.width,  saved.left));
-            const t = Math.max(minTop,  Math.min(minTop  + bRect.height - pRect.height, saved.top));
+            // Allow the panel to overflow the image bounds by 4 pixels
+            const overflow = 4;
+            const minLeftAllowed = minLeft - overflow;
+            const maxLeftAllowed = minLeft + bRect.width  - pRect.width + overflow;
+            const minTopAllowed  = minTop  - overflow;
+            const maxTopAllowed  = minTop  + bRect.height - pRect.height + overflow;
+            const l = Math.max(minLeftAllowed, Math.min(maxLeftAllowed, saved.left));
+            const t = Math.max(minTopAllowed,  Math.min(maxTopAllowed,  saved.top));
             panel.style.left = l + 'px';
             panel.style.top  = t + 'px';
         } else {
-            panel.style.left = (minLeft + 10) + 'px';
-            panel.style.top  = (minTop  + 10) + 'px';
+            panel.style.left = minLeft + 'px';
+            panel.style.top  = minTop  + 'px';
         }
 
         // Drag logic
@@ -1982,6 +2356,11 @@ function showMetadataOverlay(filename, metadata, imageWrapper) {
             const fromText   = TEXT_TAGS.has(e.target.tagName);
             if (!fromHandle && fromText) return;
 
+            // Notify the lightbox overlay that drag started inside content,
+            // so releasing outside doesn't trigger a spurious close click.
+            const lbOverlay = document.getElementById('lightbox-overlay');
+            if (lbOverlay?._setMousedownInsideContent) lbOverlay._setMousedownInsideContent(true);
+
             e.preventDefault();
             e.stopPropagation();
 
@@ -1989,6 +2368,9 @@ function showMetadataOverlay(filename, metadata, imageWrapper) {
             const startTop  = parseFloat(panel.style.top);
             const startX    = e.clientX;
             const startY    = e.clientY;
+            // Lock current width to avoid it being reflowed/squished while dragging
+            const startWidth = panel.getBoundingClientRect().width;
+            panel.style.width = startWidth + 'px';
 
             function onMove(e) {
                 const imgEl = imageWrapper.querySelector('.lightbox-image');
@@ -1998,11 +2380,13 @@ function showMetadataOverlay(filename, metadata, imageWrapper) {
                 const pRect = panel.getBoundingClientRect();
                 const rawLeft = startLeft + e.clientX - startX;
                 const rawTop  = startTop  + e.clientY - startY;
-                // Clamp within image bounds, expressed as offsets relative to overlay
-                const minLeft = bRect.left - oRect.left;
-                const minTop  = bRect.top  - oRect.top;
-                const maxLeft = minLeft + bRect.width  - pRect.width;
-                const maxTop  = minTop  + bRect.height - pRect.height;
+                // Clamp within image bounds, expressed as offsets relative to overlay,
+                // but allow a small overflow so the panel can go slightly outside the image.
+                const overflow = 4;
+                const minLeft = bRect.left - oRect.left - overflow;
+                const minTop  = bRect.top  - oRect.top  - overflow;
+                const maxLeft = minLeft + bRect.width  - pRect.width + (overflow * 2);
+                const maxTop  = minTop  + bRect.height - pRect.height + (overflow * 2);
                 panel.style.left = Math.max(minLeft, Math.min(maxLeft, rawLeft)) + 'px';
                 panel.style.top  = Math.max(minTop,  Math.min(maxTop,  rawTop))  + 'px';
             }
@@ -2010,6 +2394,8 @@ function showMetadataOverlay(filename, metadata, imageWrapper) {
             function onUp() {
                 panel.style.cursor = 'grab';
                 document.body.style.cursor = '';
+                // Release width lock so panel can resize naturally again
+                panel.style.width = '';
                 imoPanelPositions.single = {
                     left: parseFloat(panel.style.left),
                     top:  parseFloat(panel.style.top)
@@ -2068,7 +2454,7 @@ function showImportModal(fileCount) {
             </div>
             <div class="modal-footer">
                 <button class="button-secondary modal-cancel">Cancel</button>
-                <button class="modal-import" disabled>Import</button>
+                <button class="modal-import">Import</button>
             </div>
         `;
 
@@ -2124,9 +2510,45 @@ function showImportModal(fileCount) {
             clearTimeout(debounceTimer);
             debounceTimer = setTimeout(doSearch, 350);
         });
+        let highlightedIndex = -1;
+
+        function getResultItems() {
+            return Array.from(resultsEl.querySelectorAll('.game-result-item'));
+        }
+
+        function setHighlight(idx) {
+            const items = getResultItems();
+            items.forEach(el => el.classList.remove('game-result-item-highlighted'));
+            highlightedIndex = Math.max(-1, Math.min(idx, items.length - 1));
+            if (highlightedIndex >= 0) {
+                items[highlightedIndex].classList.add('game-result-item-highlighted');
+                items[highlightedIndex].scrollIntoView({ block: 'nearest' });
+            }
+        }
+
         searchInput.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') { e.preventDefault(); clearTimeout(debounceTimer); doSearch(); }
-            if (e.key === 'Escape') { e.stopPropagation(); resultsEl.innerHTML = ''; resultsEl.style.display = 'none'; }
+            const items = getResultItems();
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                setHighlight(highlightedIndex + 1);
+            } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                setHighlight(highlightedIndex - 1);
+            } else if (e.key === 'Enter') {
+                e.preventDefault();
+                if (highlightedIndex >= 0 && items[highlightedIndex]) {
+                    items[highlightedIndex].click();
+                    highlightedIndex = -1;
+                } else {
+                    clearTimeout(debounceTimer);
+                    doSearch();
+                }
+            } else if (e.key === 'Escape') {
+                e.stopPropagation();
+                resultsEl.innerHTML = '';
+                resultsEl.style.display = 'none';
+                highlightedIndex = -1;
+            }
         });
         searchInput.addEventListener('blur', () => {
             setTimeout(() => { resultsEl.innerHTML = ''; resultsEl.style.display = 'none'; }, 150);
@@ -2152,10 +2574,14 @@ function showImportModal(fileCount) {
                 chip.textContent = type.label;
                 chip.dataset.id = type.id;
                 chip.onclick = () => {
+                    const isSelected = chip.classList.contains('selected');
                     grid.querySelectorAll('.hdr-type-chip').forEach(c => c.classList.remove('selected'));
-                    chip.classList.add('selected');
-                    selected = type.id;
-                    importBtn.disabled = false;
+                    if (!isSelected) {
+                        chip.classList.add('selected');
+                        selected = type.id;
+                    } else {
+                        selected = null;
+                    }
                 };
                 row.appendChild(chip);
             });
@@ -2173,7 +2599,7 @@ function showImportModal(fileCount) {
         importBtn.onclick = () => {
             overlay.remove();
             document.removeEventListener('keydown', onImportKeydown, true);
-            resolve({ hdrType: selected, gameName: selectedGameName });
+            resolve({ hdrType: selected ?? 'unknown', gameName: selectedGameName });
         };
 
         let importMousedownOnModal = false;
@@ -2298,9 +2724,45 @@ function showEditModal(currentHdrType, currentGameName) {
             clearTimeout(debounceTimer);
             debounceTimer = setTimeout(doSearch, 350);
         });
+        let highlightedIndex = -1;
+
+        function getResultItems() {
+            return Array.from(resultsEl.querySelectorAll('.game-result-item'));
+        }
+
+        function setHighlight(idx) {
+            const items = getResultItems();
+            items.forEach(el => el.classList.remove('game-result-item-highlighted'));
+            highlightedIndex = Math.max(-1, Math.min(idx, items.length - 1));
+            if (highlightedIndex >= 0) {
+                items[highlightedIndex].classList.add('game-result-item-highlighted');
+                items[highlightedIndex].scrollIntoView({ block: 'nearest' });
+            }
+        }
+
         searchInput.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') { e.preventDefault(); clearTimeout(debounceTimer); doSearch(); }
-            if (e.key === 'Escape') { e.stopPropagation(); resultsEl.innerHTML = ''; resultsEl.style.display = 'none'; }
+            const items = getResultItems();
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                setHighlight(highlightedIndex + 1);
+            } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                setHighlight(highlightedIndex - 1);
+            } else if (e.key === 'Enter') {
+                e.preventDefault();
+                if (highlightedIndex >= 0 && items[highlightedIndex]) {
+                    items[highlightedIndex].click();
+                    highlightedIndex = -1;
+                } else {
+                    clearTimeout(debounceTimer);
+                    doSearch();
+                }
+            } else if (e.key === 'Escape') {
+                e.stopPropagation();
+                resultsEl.innerHTML = '';
+                resultsEl.style.display = 'none';
+                highlightedIndex = -1;
+            }
         });
         searchInput.addEventListener('blur', () => {
             // Delay so a click on a result fires before the list disappears
@@ -2345,7 +2807,7 @@ function showEditModal(currentHdrType, currentGameName) {
                         chip.classList.add('selected');
                         selectedHdrType = type.id;
                     } else {
-                        selectedHdrType = 'none';
+                        selectedHdrType = 'unknown';
                     }
                 };
                 row.appendChild(chip);
@@ -2364,7 +2826,7 @@ function showEditModal(currentHdrType, currentGameName) {
         saveBtn.onclick = () => {
             overlay.remove();
             document.removeEventListener('keydown', onModalKeydown, true);
-            resolve({ hdrType: selectedHdrType, gameName: selectedGameName });
+            resolve({ hdrType: selectedHdrType ?? 'unknown', gameName: selectedGameName });
         };
 
         let editMousedownOnModal = false;
@@ -2425,7 +2887,48 @@ function buildFilterBar(allItems) {
     function showSuggestions(query) {
         const q = query.trim().toLowerCase();
         dropdown.innerHTML = '';
-        if (!q) { dropdown.style.display = 'none'; return; }
+
+        if (!q) {
+            // Show top 5 games by image count
+            const countMap = new Map();
+            _allGalleryItems.forEach(item => {
+                if (item.gameName) countMap.set(item.gameName, (countMap.get(item.gameName) || 0) + 1);
+            });
+            const top5 = [...countMap.entries()]
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 5);
+
+            if (top5.length === 0) { dropdown.style.display = 'none'; return; }
+
+            const header = document.createElement('div');
+            header.className = 'gallery-search-dropdown-header';
+            header.textContent = 'Most images';
+            dropdown.appendChild(header);
+
+            top5.forEach(([name, count]) => {
+                const item = document.createElement('div');
+                item.className = 'gallery-search-suggestion';
+                const nameSpan = document.createElement('span');
+                nameSpan.textContent = name;
+                const countSpan = document.createElement('span');
+                countSpan.className = 'gallery-search-suggestion-count';
+                countSpan.textContent = `${count} img${count === 1 ? '' : 's'}`;
+                item.appendChild(nameSpan);
+                item.appendChild(countSpan);
+                item.addEventListener('mousedown', (e) => {
+                    e.preventDefault();
+                    gameSearchQuery = name;
+                    input.value = name;
+                    clearBtn.style.display = 'flex';
+                    dropdown.innerHTML = '';
+                    dropdown.style.display = 'none';
+                    renderGallery(_allGalleryItems);
+                });
+                dropdown.appendChild(item);
+            });
+            dropdown.style.display = 'flex';
+            return;
+        }
 
         const matches = gameNames.filter(n => n.toLowerCase().includes(q));
         if (matches.length === 0) { dropdown.style.display = 'none'; return; }
@@ -2463,16 +2966,44 @@ function buildFilterBar(allItems) {
         }, 180);
     });
 
-    input.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape') {
-            dropdown.innerHTML = '';
-            dropdown.style.display = 'none';
-            input.blur();
+    let galleryHighlightedIndex = -1;
+
+    function getGallerySuggestions() {
+        return Array.from(dropdown.querySelectorAll('.gallery-search-suggestion'));
+    }
+
+    function setGalleryHighlight(idx) {
+        const items = getGallerySuggestions();
+        items.forEach(el => el.classList.remove('gallery-search-suggestion-highlighted'));
+        galleryHighlightedIndex = Math.max(-1, Math.min(idx, items.length - 1));
+        if (galleryHighlightedIndex >= 0) {
+            items[galleryHighlightedIndex].classList.add('gallery-search-suggestion-highlighted');
+            items[galleryHighlightedIndex].scrollIntoView({ block: 'nearest' });
         }
-        if (e.key === 'Enter') {
+    }
+
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            setGalleryHighlight(galleryHighlightedIndex + 1);
+        } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            setGalleryHighlight(galleryHighlightedIndex - 1);
+        } else if (e.key === 'Enter') {
+            const items = getGallerySuggestions();
+            if (galleryHighlightedIndex >= 0 && items[galleryHighlightedIndex]) {
+                items[galleryHighlightedIndex].dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                galleryHighlightedIndex = -1;
+            } else {
+                dropdown.innerHTML = '';
+                dropdown.style.display = 'none';
+                renderGallery(_allGalleryItems);
+            }
+        } else if (e.key === 'Escape') {
             dropdown.innerHTML = '';
             dropdown.style.display = 'none';
-            renderGallery(_allGalleryItems);
+            galleryHighlightedIndex = -1;
+            input.blur();
         }
     });
 
