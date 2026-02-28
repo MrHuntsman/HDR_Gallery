@@ -24,7 +24,7 @@
         <h1>HDR Gallery</h1>
         <div class="upload-section">
             <div class="drop-zone" id="dropZone">
-                <p class="drop-zone-text">Drop HDR Images or Click Here</p>
+                <p class="drop-zone-text">Drop Images or Click Here</p>
                 <p class="drop-zone-formats">.png .avif .jxr .exr .hdr</p>
             </div>
             <input id="fileInput" type="file" multiple accept=".png,.avif,.jxr,.exr,.hdr" aria-label="Select HDR image files" style="display:none;" />
@@ -37,6 +37,9 @@
         <div id="gallery" class="gallery"></div>
     </div>
 
+    <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
+    <script src="db.js"></script>
     <script src="image-processing.js"></script>
     <script src="script.js"></script>
     <script>

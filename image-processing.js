@@ -8,6 +8,40 @@ let magickLoading = null;
 let _ImageMagick = null;
 let _MagickFormat = null;
 
+// Cache key — bump this string whenever magick.wasm is updated so stale bytes
+// are evicted and the new version is fetched and re-cached automatically.
+const _MAGICK_WASM_URL     = './image-processing/magick.wasm';
+const _MAGICK_CACHE_NAME   = 'magick-wasm-v1';
+
+// Retrieves magick.wasm from the Cache Storage API, fetching and caching it on
+// first use. Subsequent page loads (and refreshes) are served entirely from the
+// cache — no network round-trip, no repeated multi-MB download.
+async function _getMagickWasmUrl() {
+    let cache;
+    try { cache = await caches.open(_MAGICK_CACHE_NAME); } catch (_) { return _MAGICK_WASM_URL; }
+
+    let response = await cache.match(_MAGICK_WASM_URL);
+    if (!response) {
+        console.log('[getMagick] magick.wasm not in cache — fetching and caching…');
+        try {
+            const fresh = await fetch(_MAGICK_WASM_URL);
+            if (!fresh.ok) throw new Error(`fetch ${fresh.status}`);
+            await cache.put(_MAGICK_WASM_URL, fresh.clone());
+            response = fresh;
+        } catch (err) {
+            console.warn('[getMagick] cache store failed, falling back to direct URL:', err);
+            return _MAGICK_WASM_URL;
+        }
+    } else {
+        console.log('[getMagick] magick.wasm served from Cache Storage');
+    }
+
+    // Convert cached response to a blob URL so ImageMagick can load it without
+    // triggering another network request.
+    const blob = await response.blob();
+    return URL.createObjectURL(blob);
+}
+
 async function getMagick() {
     if (magickReady) return { ImageMagick: _ImageMagick, MagickFormat: _MagickFormat };
     if (magickLoading) return magickLoading;
@@ -21,7 +55,8 @@ async function getMagick() {
             document.head.appendChild(script);
         });
 
-        await window.ImageMagick.initializeImageMagick('./image-processing/magick.wasm');
+        const wasmUrl = await _getMagickWasmUrl();
+        await window.ImageMagick.initializeImageMagick(wasmUrl);
 
         _ImageMagick = window.ImageMagick.ImageMagick;
         _MagickFormat = window.ImageMagick.MagickFormat;
@@ -917,6 +952,251 @@ async function convertHdrExrToPNG(file) {
     return { hdrFile, sdrBlob: sdrFile, thumbBlob };
 }
 
+// ─── AVIF Encoder Helpers ─────────────────────────────────────────────────────
+
+let _avifEncode = null;
+async function _getAvifEncoder() {
+    if (_avifEncode) return _avifEncode;
+    const mod = await import('https://esm.sh/@jsquash/avif');
+    _avifEncode = mod.encode;
+    return _avifEncode;
+}
+
+let _avifDecode = null;
+async function _getAvifDecoder() {
+    if (_avifDecode) return _avifDecode;
+    const mod = await import('https://esm.sh/@jsquash/avif');
+    _avifDecode = mod.decode;
+    return _avifDecode;
+}
+
+// Encodes a Uint16Array of 12-bit BT.2020 PQ RGBA pixels → AVIF blob.
+// Patches the colr box to BT.2020 primaries / PQ transfer / full-range.
+async function _encodeToAVIF(u16pq, width, height) {
+    const encode = await _getAvifEncoder();
+    const avifBuf = await encode({ data: u16pq, width, height }, {
+        bitDepth: 12, quality: 80, yuvFormat: 'YUV444', matrixCoefficients: 9, speed: 8,
+    });
+    const data = new Uint8Array(avifBuf);
+    const view = new DataView(avifBuf);
+    function patchColr(d, v, start, end) {
+        let off = start;
+        while (off + 8 <= end) {
+            const size = v.getUint32(off); if (size < 8) break;
+            const type = String.fromCharCode(d[off+4],d[off+5],d[off+6],d[off+7]);
+            if (type === 'colr') {
+                v.setUint16(off+12, 9); v.setUint16(off+14, 16);
+                v.setUint16(off+16, 9); d[off+18] = 0x80; return;
+            }
+            const cs = type === 'meta' ? off+12 : off+8;
+            if (['meta','iprp','ipco'].includes(type)) patchColr(d, v, cs, off+size);
+            off += size;
+        }
+    }
+    patchColr(data, view, 0, data.length);
+    return new Blob([data], { type: 'image/avif' });
+}
+
+// Compute luminance stats and gamut from a 12-bit BT.2020 PQ u16pq buffer.
+// This runs immediately after encoding so we never have to re-decode the AVIF.
+function _statsFromU12PQ(u16pq, width, height) {
+    const numPixels = width * height;
+    const sampleStep = numPixels > 8000000 ? Math.ceil(numPixels / 4000000) : 1;
+
+    // PQ EOTF: 12-bit code value [0,4095] → cd/m²
+    function pqNits(v) {
+        const n = v / 4095;
+        const vp = Math.pow(Math.max(n,0), 1/78.84375);
+        return 10000 * Math.pow(Math.max(vp-0.8359375,0) / Math.max(18.8515625-18.6875*vp, 1e-10), 1/0.1593017578125);
+    }
+    // PQ EOTF → linear light (normalised, 1.0 = 10000 nits)
+    function pqLinear(v) {
+        const n = v / 4095;
+        const vp = Math.pow(Math.max(n,0), 1/_PQ_M);
+        return Math.pow(Math.max(vp-_PQ_C1,0) / Math.max(_PQ_C2-_PQ_C3*vp,1e-10), 1/_PQ_N) * _SKIV_MAX_PQ;
+    }
+
+    // BT.2020 → BT.709
+    const M=[1.66049094578,-0.58764109488,-0.07284986467,-0.12455046637,1.13289988028,-0.00834942203,-0.01815076427,-0.10057889487,1.11872966227];
+    const M_709_TO_P3=[0.822461962699890,0.177538037300110,0,0.033194199204445,0.966805815696716,0,0.017082631587982,0.072397440671921,0.910519957542419];
+    const M_709_TO_2020=[0.627403914928436,0.329283028841019,0.043313067406416,0.069097287952900,0.919540405273438,0.011362315155566,0.016391439363360,0.088013306260109,0.895595252513885];
+    function m3(m,r,g,b){return[m[0]*r+m[1]*g+m[2]*b,m[3]*r+m[4]*g+m[5]*b,m[6]*r+m[7]*g+m[8]*b];}
+
+    let maxLum=0, minLum=Infinity, totalLum=0, maxChan=0;
+    let g709=0, gP3=0, g2020=0, gTotal=0;
+    const FP16_MIN=0.0005;
+
+    for (let i=0; i<numPixels; i+=sampleStep) {
+        const r12=u16pq[i*4], g12=u16pq[i*4+1], b12=u16pq[i*4+2];
+        const rN=pqNits(r12), gN=pqNits(g12), bN=pqNits(b12);
+        const lum=0.2126*rN+0.7152*gN+0.0722*bN;
+        if(lum>maxLum)maxLum=lum; if(lum<minLum)minLum=lum; totalLum+=lum;
+        const ch=Math.max(rN,gN,bN); if(ch>maxChan)maxChan=ch;
+
+        // Gamut: decode to linear BT.2020, convert to BT.709 scRGB, classify
+        const rL=pqLinear(r12), gL=pqLinear(g12), bL=pqLinear(b12);
+        const [r,g,b]=m3(M,rL,gL,bL); // BT.2020 → BT.709
+        const Y=0.212639*r+0.715169*g+0.072192*b; gTotal++;
+        if((r>=0&&g>=0&&b>=0)||Y<FP16_MIN){g709++;continue;}
+        const[p3r,p3g,p3b]=m3(M_709_TO_P3,r,g,b); if(p3r>=0&&p3g>=0&&p3b>=0){gP3++;continue;}
+        const[r20,g20,b20]=m3(M_709_TO_2020,r,g,b); if(r20>=0&&g20>=0&&b20>=0){g2020++;}
+    }
+
+    const sampleCount = Math.ceil(numPixels / sampleStep);
+    return {
+        luminanceStats: {
+            maxCLL: maxChan,
+            maxLuminance: maxLum,
+            avgLuminance: totalLum / sampleCount,
+            minLuminance: minLum === Infinity ? 0 : minLum,
+            bitDepth: 12,
+            transferCharacteristic: 16,
+        },
+        gamutCoverage: gTotal > 0 ? {
+            rec709:  (g709/gTotal*100).toFixed(4),
+            p3:      (gP3/gTotal*100).toFixed(4),
+            bt2020:  (g2020/gTotal*100).toFixed(4),
+            sourcePrimaries: 'BT.2020',
+        } : null,
+    };
+}
+
+// ─── Any Format → AVIF ────────────────────────────────────────────────────────
+// Converts any supported HDR format directly to a 12-bit BT.2020 PQ AVIF.
+// Returns { hdrFile, sdrBlob, thumbBlob } — same shape as convertToPNG.
+// hdrFile has _avifStats attached so getBasicImageMetadata never needs to re-decode.
+async function convertToAVIF(file) {
+    const ext = getFileExtension(file.name);
+    const outputName = file.name.replace(/\.[^.]+$/, '.avif');
+
+    // ── PNG: already BT.2020 PQ 16-bit — decode via pixel-worker, shift 16→12 ─
+    if (ext === '.png') {
+        const ab = await file.arrayBuffer();
+        const pixelData = await new Promise((resolve, reject) => {
+            const worker = new Worker('./pixel-worker.js', { type: 'module' });
+            worker.postMessage({ arrayBuffer: ab }, [ab]);
+            worker.onmessage = e => { worker.terminate(); resolve(e.data); };
+            worker.onerror   = e => { worker.terminate(); reject(new Error(e.message)); };
+        });
+        if (pixelData.error) throw new Error('pixel-worker: ' + pixelData.error);
+
+        const { pixels, width, height, samplesPerPixel } = pixelData;
+        const u16pq = new Uint16Array(width * height * 4);
+        for (let i=0, p=0; i<width*height; i++) {
+            const base = i * samplesPerPixel * 2;
+            u16pq[p++] = ((pixels[base]  <<8)|pixels[base+1]) >> 4;
+            u16pq[p++] = ((pixels[base+2]<<8)|pixels[base+3]) >> 4;
+            u16pq[p++] = ((pixels[base+4]<<8)|pixels[base+5]) >> 4;
+            u16pq[p++] = samplesPerPixel===4 ? ((pixels[base+6]<<8)|pixels[base+7])>>4 : 4095;
+        }
+
+        const avifBlob = await _encodeToAVIF(u16pq, width, height);
+        const hdrFile  = new File([avifBlob], outputName, { type: 'image/avif' });
+        hdrFile._avifStats = _statsFromU12PQ(u16pq, width, height);
+        if (file._jxrGamut) hdrFile._avifStats.gamutCoverage = file._jxrGamut;
+
+        const sdrBlob   = await convertToSDR(file, file.name);
+        const thumbBlob = await generateThumb(file, 1280);
+        return { hdrFile, sdrBlob, thumbBlob };
+    }
+
+    // ── JXR / EXR / HDR: decode to linear scRGB floats ───────────────────────
+    if (ext === '.jxr' || ext === '.exr' || ext === '.hdr') {
+        let getLinear, channels, width, height;
+
+        if (ext === '.jxr') {
+            const codec = await getJpegXrCodec();
+            const decoded = codec.decode(new Uint8Array(await file.arrayBuffer()));
+            width = decoded.width; height = decoded.height;
+            channels = decoded.pixelInfo.channels;
+            const { bitDepth } = decoded.pixelInfo;
+            if (bitDepth !== '16Float' && bitDepth !== '32Float') {
+                // Integer JXR — go via PNG path
+                const r = await convertJxrToPNG(file);
+                return convertToAVIF(r.hdrFile);
+            }
+            const is32 = bitDepth === '32Float';
+            const safeBuf = new ArrayBuffer(decoded.bytes.length);
+            new Uint8Array(safeBuf).set(decoded.bytes);
+            const sv = is32 ? new Float32Array(safeBuf) : new Uint16Array(safeBuf);
+            function f16(h){const s=(h>>>15)?-1:1,e=(h>>>10)&0x1f,m=h&0x03ff;if(e===0)return s*Math.pow(2,-14)*(m/1024);if(e===31)return m?NaN:s*Infinity;return s*Math.pow(2,e-15)*(1+m/1024);}
+            getLinear = is32 ? i=>sv[i] : i=>f16(sv[i]);
+        } else {
+            const inputData = new Uint8Array(await file.arrayBuffer());
+            const decoded = ext === '.hdr' ? _decodeRGBE(inputData) : await _decodeEXR(inputData);
+            width = decoded.width; height = decoded.height; channels = 3;
+            getLinear = i => decoded.floats[i];
+        }
+
+        return _floatsToAVIF(getLinear, channels, width, height, outputName);
+    }
+
+    // ── AVIF input: re-encode at 12-bit ──────────────────────────────────────
+    if (ext === '.avif') {
+        const r = await convertToPNG(file);
+        return convertToAVIF(r.hdrFile);
+    }
+
+    throw new Error(`convertToAVIF: unsupported format "${ext}"`);
+}
+
+// Shared float→AVIF path for JXR / EXR / HDR.
+// getLinear(sampleIndex) returns a BT.709 linear scRGB float.
+async function _floatsToAVIF(getLinear, channels, width, height, outputName) {
+    const numPixels = width * height;
+
+    // 99.94th-percentile for SDR tonemap peak
+    const pqFreq = new Uint32Array(65536); let maxPQseen=0;
+    for (let i=0; i<numPixels; i++) {
+        const fi=i*channels;
+        const Y=Math.max(0.212639*getLinear(fi)+0.715169*getLinear(fi+1)+0.072192*getLinear(fi+2),0);
+        const pq=pqOetf_global(Math.min(_SKIV_MAX_PQ,Y));
+        pqFreq[Math.min(Math.round(pq*65535),65535)]++;
+        if(pq>maxPQseen)maxPQseen=pq;
+    }
+    let maxYInPQ=maxPQseen;
+    {let pct=100;for(let i=65535;i>=0;i--){pct-=100*pqFreq[i]/numPixels;if(pct<=99.94){maxYInPQ=i/65535;break;}}}
+    maxYInPQ=Math.max(_SDR_Y_IN_PQ,maxYInPQ);
+
+    const u16pq  = new Uint16Array(numPixels*4);
+    const sdrBuf = new Uint8ClampedArray(numPixels*4);
+
+    for (let i=0; i<numPixels; i++) {
+        const fi=i*channels;
+        const r=Math.max(isFinite(getLinear(fi))  ?getLinear(fi)  :0,0);
+        const g=Math.max(isFinite(getLinear(fi+1))?getLinear(fi+1):0,0);
+        const b=Math.max(isFinite(getLinear(fi+2))?getLinear(fi+2):0,0);
+        const [r20,g20,b20]=_mat3(_M_709_TO_2020,r,g,b);
+        u16pq[i*4]  =Math.round(pqOetf_global(Math.max(r20,0))*4095);
+        u16pq[i*4+1]=Math.round(pqOetf_global(Math.max(g20,0))*4095);
+        u16pq[i*4+2]=Math.round(pqOetf_global(Math.max(b20,0))*4095);
+        u16pq[i*4+3]=4095;
+        const[rt,gt,bt]=tonemapICtCp_global(r,g,b,maxYInPQ);
+        sdrBuf[i*4]=Math.round(_srgbLut(rt)*255); sdrBuf[i*4+1]=Math.round(_srgbLut(gt)*255);
+        sdrBuf[i*4+2]=Math.round(_srgbLut(bt)*255); sdrBuf[i*4+3]=255;
+    }
+
+    const avifBlob = await _encodeToAVIF(u16pq, width, height);
+    const hdrFile  = new File([avifBlob], outputName, { type: 'image/avif' });
+    hdrFile._avifStats = _statsFromU12PQ(u16pq, width, height);
+
+    const sdrPng   = await buildPNG8(sdrBuf, width, height);
+    const sdrBlob  = new File([sdrPng], outputName.replace('.avif','_SDR.png'), { type:'image/png' });
+
+    // Thumb: build a small HDR PNG from the 12-bit buffer (shift up to 16-bit LE)
+    const hdrBuf16 = new Uint8Array(numPixels*8);
+    for (let i=0; i<numPixels; i++) {
+        const v0=u16pq[i*4]<<4, v1=u16pq[i*4+1]<<4, v2=u16pq[i*4+2]<<4;
+        hdrBuf16[i*8]=v0&0xff; hdrBuf16[i*8+1]=(v0>>8)&0xff;
+        hdrBuf16[i*8+2]=v1&0xff; hdrBuf16[i*8+3]=(v1>>8)&0xff;
+        hdrBuf16[i*8+4]=v2&0xff; hdrBuf16[i*8+5]=(v2>>8)&0xff;
+        hdrBuf16[i*8+6]=0xff; hdrBuf16[i*8+7]=0xff;
+    }
+    const thumbBlob = await buildHdrThumb(hdrBuf16, width, height, {primaries:9,transfer:16}, 1280);
+
+    return { hdrFile, sdrBlob, thumbBlob };
+}
+
 async function convertToPNG(file) {
     const ext = getFileExtension(file.name);
 
@@ -1521,7 +1801,8 @@ async function parsePNGMetadata(blob) {
 }
 
 // ─── AVIF Metadata Parser ─────────────────────────────────────────────────────
-// Scans the first 50 KB of an AVIF file for colr/pixi/clli/mdcv boxes.
+// Recursively walks the ISOBMFF box tree. colr/pixi/clli/mdcv are nested inside
+// meta → iprp → ipco — a flat top-level scan misses them entirely.
 async function parseAVIFMetadata(blob) {
     try {
         const arrayBuffer = await blob.arrayBuffer();
@@ -1529,55 +1810,69 @@ async function parseAVIFMetadata(blob) {
         if (data.length < 12) return null;
         if (String.fromCharCode(data[4],data[5],data[6],data[7]) !== 'ftyp') return null;
 
-        let bitDepth = '10-bit (typical)';
-        let transferFunction = 'Not specified';
+        let bitDepth = '12-bit';
+        let colorPrimaries = null, transferCharacteristic = null;
         let maxCLL = null, maxFALL = null;
         let maxLuminance = null, minLuminance = null;
 
-        let offset = 0;
-        while (offset < Math.min(data.length - 8, 50000)) {
-            if (offset + 8 > data.length) break;
-            const boxSize = (data[offset]<<24|data[offset+1]<<16|data[offset+2]<<8|data[offset+3]) >>> 0;
-            if (boxSize === 0 || boxSize === 1 || boxSize > data.length - offset) { offset += 8; continue; }
-            const boxType = String.fromCharCode(data[offset+4],data[offset+5],data[offset+6],data[offset+7]);
+        const CONTAINERS      = new Set(['moov','trak','mdia','minf','stbl','stsd','av01','avio','ipco','iprp','moof','traf']);
+        const FULL_CONTAINERS = new Set(['meta','iinf']); // FullBoxes: 4-byte version+flags prefix
 
-            if (boxType === 'colr' && offset + 12 < data.length) {
-                const ct = String.fromCharCode(data[offset+8],data[offset+9],data[offset+10],data[offset+11]);
-                if (ct === 'nclx') {
-                    const tc = data[offset + 14];
-                    transferFunction = tc === 16 ? 'PQ (HDR10 / ST.2084)'
-                                     : tc === 18 ? 'HLG (Hybrid Log-Gamma)'
-                                     : (tc === 1 || tc === 13) ? 'sRGB / BT.709'
-                                     : 'Not specified';
+        function walk(start, end) {
+            let off = start;
+            while (off + 8 <= end) {
+                const size = (data[off]<<24|data[off+1]<<16|data[off+2]<<8|data[off+3]) >>> 0;
+                if (size < 8 || off + size > end) break;
+                const type = String.fromCharCode(data[off+4],data[off+5],data[off+6],data[off+7]);
+
+                if (type === 'colr' && off + 18 <= end) {
+                    const ct = String.fromCharCode(data[off+8],data[off+9],data[off+10],data[off+11]);
+                    if (ct === 'nclx') {
+                        colorPrimaries         = (data[off+12]<<8)|data[off+13];
+                        transferCharacteristic = (data[off+14]<<8)|data[off+15];
+                    }
+                } else if (type === 'pixi' && off + 14 <= end) {
+                    // pixi = FullBox: [4 size][4 type][1 version][3 flags][1 num_channels][1+ bpc...]
+                    // off+8=version, off+9..11=flags, off+12=num_channels, off+13=bpc[0]
+                    const bpc = data[off + 13];
+                    if (bpc > 0) bitDepth = `${bpc}-bit`;
+                } else if (type === 'clli' && off + 12 <= end) {
+                    maxCLL  = (data[off+8] <<8)|data[off+9];
+                    maxFALL = (data[off+10]<<8)|data[off+11];
+                } else if (type === 'mdcv' && off + 40 <= end) {
+                    const base = off + 8 + 24; // skip 3×(x,y) primary pairs = 24 bytes
+                    maxLuminance = ((data[base]  <<24|data[base+1]<<16|data[base+2]<<8|data[base+3])>>>0) / 10000;
+                    minLuminance = ((data[base+4]<<24|data[base+5]<<16|data[base+6]<<8|data[base+7])>>>0) / 10000;
+                } else if (type === 'mdat') {
+                    break; // pixel data — stop
                 }
-            } else if (boxType === 'pixi' && offset + 12 < data.length) {
-                const bpc = data[offset + 12];
-                if (bpc > 0) bitDepth = `${bpc}-bit`;
-            } else if (boxType === 'clli' && offset + 16 <= data.length) {
-                maxCLL  = (data[offset+8]  << 8) | data[offset+9];
-                maxFALL = (data[offset+10] << 8) | data[offset+11];
-            } else if (boxType === 'mdcv' && offset + 32 <= data.length) {
-                const base = offset + 8 + 24; // skip display primaries
-                if (base + 8 <= data.length) {
-                    maxLuminance = ((data[base]  <<24|data[base+1]<<16|data[base+2]<<8|data[base+3]) >>> 0) / 10000;
-                    minLuminance = ((data[base+4]<<24|data[base+5]<<16|data[base+6]<<8|data[base+7]) >>> 0) / 10000;
-                }
+
+                if (CONTAINERS.has(type))           walk(off + 8,  off + size);
+                else if (FULL_CONTAINERS.has(type)) walk(off + 12, off + size);
+
+                off += size;
             }
-
-            offset += boxSize;
         }
+        walk(0, Math.min(data.length, 300000));
+
+        const tcNames = {16:'PQ (HDR10 / ST.2084)',18:'HLG (Hybrid Log-Gamma)',1:'sRGB / BT.709',13:'sRGB / BT.709'};
+        const cpNames = {1:'BT.709',9:'BT.2020',12:'P3-D65',11:'P3-DCI'};
+        const transferFunction = transferCharacteristic !== null
+            ? (tcNames[transferCharacteristic] || `Transfer ID ${transferCharacteristic}`)
+            : 'Not specified';
 
         return {
             bitDepth,
             colorType: 'RGB/RGBA',
+            colorPrimaries: colorPrimaries !== null ? (cpNames[colorPrimaries] || `Primaries ID ${colorPrimaries}`) : null,
             gamma: transferFunction.includes('sRGB') ? '2.2 (sRGB)' : 'HDR transfer function',
-            hasColorProfile: transferFunction !== 'Not specified',
+            hasColorProfile: transferCharacteristic !== null,
             transferFunction,
             format: 'AVIF (AV1 Image)',
-            maxContentLightLevel:      maxCLL  ? `${maxCLL} nits`               : null,
-            maxFrameAverageLightLevel: maxFALL ? `${maxFALL} nits`              : null,
-            maxLuminance: maxLuminance ? `${maxLuminance.toFixed(2)} nits`      : null,
-            minLuminance: minLuminance ? `${minLuminance.toFixed(4)} nits`      : null,
+            maxContentLightLevel:      maxCLL  != null ? `${maxCLL} nits`              : null,
+            maxFrameAverageLightLevel: maxFALL != null ? `${maxFALL} nits`             : null,
+            maxLuminance: maxLuminance != null ? `${maxLuminance.toFixed(2)} nits`     : null,
+            minLuminance: minLuminance != null ? `${minLuminance.toFixed(4)} nits`     : null,
         };
     } catch (error) {
         console.error('AVIF parsing error:', error);
@@ -1591,7 +1886,36 @@ async function parseAVIFMetadata(blob) {
 async function decodePixelBuffer(blob) {
     const arrayBuffer = await blob.arrayBuffer();
     const data = new Uint8Array(arrayBuffer);
-    if (data[0] !== 0x89 || data[1] !== 0x50) return null;
+
+    const isPNG  = data[0] === 0x89 && data[1] === 0x50;
+    const isAVIF = data.length > 8 &&
+        String.fromCharCode(data[4], data[5], data[6], data[7]) === 'ftyp';
+
+    if (!isPNG && !isAVIF) return null;
+
+    // ── AVIF path: decode via OffscreenCanvas (mirrors pixel-worker.js) ───────
+    if (isAVIF) {
+        // Use @jsquash/avif decode with bitDepth:12 to get raw 12-bit PQ values [0–4095].
+        // This bypasses browser canvas color management entirely — no float16 requirement,
+        // no silent sRGB fallback, HDR precision is always preserved.
+        const avifDecode = await _getAvifDecoder();
+        const arrayBuffer = blob instanceof ArrayBuffer ? blob : await blob.arrayBuffer();
+        const { data, width, height } = await avifDecode(arrayBuffer, { bitDepth: 12 });
+        // data: Uint16Array, RGBA interleaved, 12-bit values [0–4095]
+        // Scale to 16-bit BE to match PNG path output format.
+        const numPixels = width * height;
+        const samplesPerPixel = 4;
+        const pixels = new Uint8Array(numPixels * samplesPerPixel * 2);
+        for (let i = 0; i < numPixels * samplesPerPixel; i++) {
+            const v12 = data[i] & 0x0fff;
+            const u16 = (v12 << 4) | (v12 >> 8);   // 12-bit → 16-bit bit-replication
+            pixels[i * 2]     = (u16 >> 8) & 0xff;
+            pixels[i * 2 + 1] =  u16       & 0xff;
+        }
+        return { pixels, width, height, samplesPerPixel, transferCharacteristic: 16 };
+    }
+
+    // ── PNG path ──────────────────────────────────────────────────────────────
 
     // Parse IHDR
     let width = 0, height = 0, bitDepth = 0, colorType = 0;
@@ -1783,14 +2107,18 @@ async function getBasicImageMetadata(blob) {
     const height = dims ? dims.height : 0;
 
     let luminanceStats = null;
-    try { luminanceStats = await analyze16BitPNG(blob); } catch(_) {}
+    let gamutCoverage  = null;
 
-    let gamutCoverage = null;
-    try {
-        // JXR conversions pre-compute gamut from raw scRGB floats and attach it to the
-        // File object to avoid re-analysing the converted PNG.
-        gamutCoverage = blob._jxrGamut ?? await analyzeGamutCoverage(blob);
-    } catch(_) {}
+    // If this blob came from convertToAVIF, the stats are pre-computed and attached
+    // directly on the File object — no re-decode needed and always accurate.
+    if (blob._avifStats) {
+        luminanceStats = blob._avifStats.luminanceStats;
+        gamutCoverage  = blob._avifStats.gamutCoverage;
+    } else {
+        // PNG path (or legacy)
+        try { luminanceStats = await analyze16BitPNG(blob); } catch(_) {}
+        try { gamutCoverage  = blob._jxrGamut ?? await analyzeGamutCoverage(blob); } catch(_) {}
+    }
 
     return {
         width, height,

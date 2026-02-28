@@ -1,186 +1,8 @@
-// ─── IndexedDB ───────────────────────────────────────────────────────────────
-
-const DB_NAME = 'hdr-gallery-db';
-const STORE_NAME = 'files';
-
-// Database operations
-function openDatabase() {
-    return new Promise((resolve, reject) => {
-        const request = indexedDB.open(DB_NAME, 6);
-        
-        request.onupgradeneeded = (event) => {
-            const database = request.result;
-            const oldVersion = event.oldVersion;
-            
-            if (!database.objectStoreNames.contains(STORE_NAME)) {
-                database.createObjectStore(STORE_NAME, { keyPath: 'id', autoIncrement: true });
-            }
-            
-            // v1 → v2: metadata field added; existing records get null, computed on first Details open
-            if (oldVersion < 2) { /* no data migration needed */ }
-            // v2 → v3: hdrType field added; existing records default to null
-            if (oldVersion < 3) { /* no data migration needed */ }
-            // v3 → v4: batchId field added; existing records default to null (treated as solo batches)
-            if (oldVersion < 4) { /* no data migration needed */ }
-            // v4 → v5: thumbBlob field added; existing records default to null (thumb generated on next import)
-            if (oldVersion < 5) { /* no data migration needed */ }
-            // v5 → v6: gameName field added per batch; existing records default to null
-            if (oldVersion < 6) { /* no data migration needed */ }
-        };
-        
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
-    });
-}
-
-// Generate a unique batch ID for a group of images uploaded together
-function generateBatchId() {
-    return `batch_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-}
-
-async function addImageFile(file, metadata = null, sdrBlob = null, hdrType = null, batchId = null, thumbBlob = null, gameName = null) {
-    const database = await openDatabase();
-    return new Promise((resolve, reject) => {
-        const transaction = database.transaction(STORE_NAME, 'readwrite');
-        const store = transaction.objectStore(STORE_NAME);
-        const entry = {
-            name: file.name,
-            type: file.type,
-            blob: file,
-            created: Date.now(),
-            metadata: metadata,
-            sdrBlob: sdrBlob,
-            hdrType: hdrType,
-            batchId: batchId,
-            thumbBlob: thumbBlob,
-            gameName: gameName,
-        };
-        const request = store.add(entry);
-        
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
-    });
-}
-
-async function getAllImageFiles() {
-    const database = await openDatabase();
-    return new Promise((resolve, reject) => {
-        const transaction = database.transaction(STORE_NAME, 'readonly');
-        const store = transaction.objectStore(STORE_NAME);
-        const request = store.getAll();
-        
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
-    });
-}
-
-async function deleteImageFile(id) {
-    const database = await openDatabase();
-    return new Promise((resolve, reject) => {
-        const transaction = database.transaction(STORE_NAME, 'readwrite');
-        const store = transaction.objectStore(STORE_NAME);
-        const request = store.delete(id);
-        
-        request.onsuccess = () => resolve();
-        request.onerror = () => reject(request.error);
-    });
-}
-
-async function deleteBatchImageFiles(ids) {
-    const database = await openDatabase();
-    return new Promise((resolve, reject) => {
-        const transaction = database.transaction(STORE_NAME, 'readwrite');
-        const store = transaction.objectStore(STORE_NAME);
-        let pending = ids.length;
-        if (pending === 0) { resolve(); return; }
-        ids.forEach(id => {
-            const req = store.delete(id);
-            req.onsuccess = () => { if (--pending === 0) resolve(); };
-            req.onerror  = () => reject(req.error);
-        });
-    });
-}
-
-async function updateImageMetadata(id, metadata) {
-    const database = await openDatabase();
-    return new Promise((resolve, reject) => {
-        const transaction = database.transaction(STORE_NAME, 'readwrite');
-        const store = transaction.objectStore(STORE_NAME);
-        const getRequest = store.get(id);
-        
-        getRequest.onsuccess = () => {
-            const record = getRequest.result;
-            if (record) {
-                record.metadata = metadata;
-                const updateRequest = store.put(record);
-                updateRequest.onsuccess = () => resolve();
-                updateRequest.onerror = () => reject(updateRequest.error);
-            } else {
-                reject(new Error('Record not found'));
-            }
-        };
-        
-        getRequest.onerror = () => reject(getRequest.error);
-    });
-}
-
-async function updateImageHdrType(id, hdrType) {
-    const database = await openDatabase();
-    return new Promise((resolve, reject) => {
-        const transaction = database.transaction(STORE_NAME, 'readwrite');
-        const store = transaction.objectStore(STORE_NAME);
-        const getRequest = store.get(id);
-        
-        getRequest.onsuccess = () => {
-            const record = getRequest.result;
-            if (record) {
-                record.hdrType = hdrType;
-                const updateRequest = store.put(record);
-                updateRequest.onsuccess = () => resolve();
-                updateRequest.onerror = () => reject(updateRequest.error);
-            } else {
-                reject(new Error('Record not found'));
-            }
-        };
-        
-        getRequest.onerror = () => reject(getRequest.error);
-    });
-}
-
-async function updateBatchGameName(batchId, gameName) {
-    const database = await openDatabase();
-    const allRecords = await new Promise((resolve, reject) => {
-        const transaction = database.transaction(STORE_NAME, 'readonly');
-        const request = transaction.objectStore(STORE_NAME).getAll();
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
-    });
-    const toUpdate = allRecords.filter(r => r.batchId === batchId);
-    if (toUpdate.length === 0) return;
-    return new Promise((resolve, reject) => {
-        const transaction = database.transaction(STORE_NAME, 'readwrite');
-        const store = transaction.objectStore(STORE_NAME);
-        let pending = toUpdate.length;
-        toUpdate.forEach(record => {
-            record.gameName = gameName;
-            const req = store.put(record);
-            req.onsuccess = () => { if (--pending === 0) resolve(); };
-            req.onerror = () => reject(req.error);
-        });
-    });
-}
-
-async function clearAllImageFiles() {
-    const database = await openDatabase();
-    return new Promise((resolve, reject) => {
-        const transaction = database.transaction(STORE_NAME, 'readwrite');
-        const store = transaction.objectStore(STORE_NAME);
-        const request = store.clear();
-        
-        request.onsuccess = () => resolve();
-        request.onerror = () => reject(request.error);
-    });
-}
+// ─── Storage layer ────────────────────────────────────────────────────────────
+// All DB/storage functions are defined in db.js (Firebase Firestore + Cloudinary).
+// generateBatchId, addImageFile, getAllImageFiles, getImageFile, deleteImageFile,
+// deleteBatchImageFiles, updateImageMetadata, updateImageHdrType,
+// updateBatchGameName, clearAllImageFiles are all available as globals from db.js.
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -210,8 +32,8 @@ let gameSearchQuery = '';
 // ─── File Handling ────────────────────────────────────────────────────────────
 
 // Supported formats
-const NATIVE_EXTENSIONS = ['.png'];                  // browser handles natively
-const CONVERT_EXTENSIONS = ['.avif', '.jxr', '.exr', '.hdr'];
+const NATIVE_EXTENSIONS = [];                        // all formats now go through AVIF re-encode pipeline
+const CONVERT_EXTENSIONS = ['.png', '.jxr', '.exr', '.hdr', '.avif']; // all converted to AVIF on import
 const ALL_EXTENSIONS = [...NATIVE_EXTENSIONS, ...CONVERT_EXTENSIONS];
 
 // File validation
@@ -286,6 +108,14 @@ _nitsRow.className = 'cursor-tooltip-nits';
 _nitsRow.style.display = 'none';
 cursorTooltip.appendChild(_nitsRow);
 
+// ─── Nit tooltip HTML helpers ─────────────────────────────────────────────────
+function _nitTooltipHTML(rNits, gNits, bNits, luminance, gamut) {
+    const fmt = v => v < 10 ? v.toFixed(2) : Math.round(v);
+    const gamutClass = gamut === 'BT.2020' ? 'nit-grid__gamut--2020' : gamut === 'DCI-P3' ? 'nit-grid__gamut--p3' : 'nit-grid__gamut--709';
+    return `<div class="nit-grid"><span>Nits</span><span>:</span><span class="nit-grid__val">${fmt(luminance)}</span><span class="nit-grid__r">R</span><span class="nit-grid__r">:</span><span class="nit-grid__val nit-grid__r">${fmt(rNits)}</span><span class="nit-grid__g">G</span><span class="nit-grid__g">:</span><span class="nit-grid__val nit-grid__g">${fmt(gNits)}</span><span class="nit-grid__b">B</span><span class="nit-grid__b">:</span><span class="nit-grid__val nit-grid__b">${fmt(bNits)}</span><span class="nit-grid__gamut ${gamutClass}">${gamut}</span></div>`;
+}
+const _NIT_LOADING_HTML = `<div class="nit-loading"><svg class="nit-loading__spinner" xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg><span class="nit-loading__text">Reading pixel data…</span></div>`;
+
 // Compat shims so existing code keeps working
 const nitTooltip = {
     _el: cursorTooltip, _row: _nitsRow,
@@ -307,6 +137,7 @@ const zoomTooltip = {
         get display() { return _zoomRow.style.display; }
     }; },
     set textContent(v) { _zoomRow.textContent = v; },
+    set innerHTML(v) { _zoomRow.innerHTML = v; },
 };
 
 // Always-current cursor position, used to immediately sample pixels when details mode is toggled on
@@ -375,12 +206,15 @@ function toggleGlobalDetailsMode() {
     updateAllDetailButtons(globalDetailsEnabled);
 
     if (globalDetailsEnabled) {
-        // If lightbox is open, apply nit-hunt cursor to the lightbox image and show details
+        // If lightbox is open, start pixel decode now and show details
         if (lightboxOpen) {
             const imgEl = document.querySelector('.lightbox-image');
             if (imgEl) imgEl.classList.add('cursor-nit-hunt');
-            const wrapper = document.querySelector('.lightbox-image-wrapper');
-            if (wrapper) wrapper.classList.add('cursor-nit-hunt');
+            const container = document.querySelector('.lightbox-image-container');
+            if (container) container.classList.add('cursor-nit-hunt');
+            // Kick off decode for the current image now that analysis tool is on
+            const currentItem = lightboxBatch[lightboxIndex];
+            if (currentItem) _startPixelDecode(currentItem);
             if (currentVisibleImage) showDetailsForImage(currentVisibleImage);
             // If cursor is already over the image, show nit tooltip immediately
             const imgElActive = document.querySelector('.lightbox-image');
@@ -393,8 +227,8 @@ function toggleGlobalDetailsMode() {
         if (lightboxOpen) {
             const imgEl = document.querySelector('.lightbox-image');
             if (imgEl) imgEl.classList.remove('cursor-nit-hunt');
-            const wrapper = document.querySelector('.lightbox-image-wrapper');
-            if (wrapper) wrapper.classList.remove('cursor-nit-hunt');
+            const container = document.querySelector('.lightbox-image-container');
+            if (container) container.classList.remove('cursor-nit-hunt');
         }
         // Hide all details overlays
         hideAllDetailsOverlays();
@@ -423,22 +257,14 @@ async function showDetailsForImage(imageId) {
     
     // If metadata is not yet loaded, fetch it
     if (!metadata) {
-        const database = await openDatabase();
-        const freshImageItem = await new Promise((resolve, reject) => {
-            const transaction = database.transaction(STORE_NAME, 'readonly');
-            const store = transaction.objectStore(STORE_NAME);
-            const request = store.get(imageItem.id);
-            request.onsuccess = () => resolve(request.result);
-            request.onerror = () => reject(request.error);
-        });
+        const freshImageItem = await getImageFile(imageItem.id);
         
         metadata = freshImageItem?.metadata;
         
         // If still no metadata, extract it
         if (!metadata) {
-            const blob = imageItem.blob instanceof Blob 
-                ? imageItem.blob 
-                : new Blob([imageItem.blob], { type: imageItem.type });
+            const resp = await fetch(imageItem.hdrUrl);
+            const blob = await resp.blob();
             metadata = await getImageMetadata(blob, imageItem.name);
             
             // Save the extracted metadata to the database
@@ -652,11 +478,11 @@ async function processFiles(selectedFiles) {
                 setProgressStep('convert', file.name);
                 try {
                     const _t = performance.now();
-                    const result = await convertToPNG(file);
-                    _importLog(`convertToPNG: ${file.name}`, _t);
-                    console.log('[convertToPNG processFiles] hdrFile:', result.hdrFile?.name, result.hdrFile?.size);
-                    console.log('[convertToPNG processFiles] sdrBlob:', result.sdrBlob?.constructor?.name, result.sdrBlob?.size);
-                    console.log('[convertToPNG processFiles] thumbBlob:', result.thumbBlob?.constructor?.name, result.thumbBlob?.size);
+                    const result = await convertToAVIF(file);
+                    _importLog(`convertToAVIF: ${file.name}`, _t);
+                    console.log('[convertToAVIF processFiles] hdrFile:', result.hdrFile?.name, result.hdrFile?.size);
+                    console.log('[convertToAVIF processFiles] sdrBlob:', result.sdrBlob?.constructor?.name, result.sdrBlob?.size);
+                    console.log('[convertToAVIF processFiles] thumbBlob:', result.thumbBlob?.constructor?.name, result.thumbBlob?.size);
                     hdrFile = result.hdrFile;
                     prebuiltSdr = result.sdrBlob;
                     prebuiltThumb = result.thumbBlob;
@@ -841,17 +667,8 @@ function createCollageCard(batchItems) {
     card.appendChild(grid);
 
     batchItems.forEach((item, idx) => {
-        const blob = item.blob instanceof Blob
-            ? item.blob
-            : new Blob([item.blob], { type: item.type });
-
-        // Use WebP thumbnail for gallery display if available, fall back to full blob
-        const displayBlob = (item.thumbBlob instanceof Blob)
-            ? item.thumbBlob
-            : blob;
-    
-        const url = URL.createObjectURL(displayBlob);
-        createdUrls.push(url);
+        // Use Cloudinary thumbnail URL for gallery display, fall back to full HDR URL
+        const url = item.thumbUrl || item.hdrUrl;
 
         const cell = document.createElement('div');
         cell.className = 'collage-cell';
@@ -865,7 +682,18 @@ function createCollageCard(batchItems) {
 
         cell.appendChild(img);
 
-
+        // On hover, pre-decode the full HDR image so the bitmap is GPU-ready
+        // before the user clicks — eliminates the visible decode stall in the lightbox.
+        cell.addEventListener('mouseenter', () => {
+            if (_decodePromises.has(item.hdrUrl)) return; // already started
+            const img = new Image();
+            img.src = item.hdrUrl;
+            const _pt = performance.now();
+            const p = img.decode().then(() => {
+                console.log(`[lightbox] hover prefetch decode complete for "${item.name}"  +${(performance.now()-_pt).toFixed(1)}ms`);
+            }).catch(() => {});
+            _decodePromises.set(item.hdrUrl, p);
+        });
 
         cell.addEventListener('click', () => openLightbox(batchItems, idx));
         grid.appendChild(cell);
@@ -906,9 +734,51 @@ let lightboxIsZooming = false;
 let lightboxZoomScale = CONFIG.zoomScale;
 let lightboxSdrActive = false;
 let lightboxSdrToggleActive = false; // full SDR view (no slider)
+let lightboxBlobUrls = new Map(); // imageId → { url, fullUrl, blob, sdrUrl }
+
+// Shared decode promise cache — keyed by hdrUrl so hover prefetch and lightbox
+// can share the same in-flight promise rather than racing each other.
+const _decodePromises = new Map(); // hdrUrl → Promise<void>
+
+// Lazily start pixel decode for a single item on demand.
+// Called when the analysis tool is enabled or when navigating while it's on.
+function _startPixelDecode(item) {
+    if (lightboxPixelBuffers.has(item.id)) return;
+    const entry = lightboxBlobUrls.get(item.id);
+    if (!entry) return;
+    const _t0 = window._lbT0 || performance.now();
+    const p = new Promise(resolve => {
+        console.log(`[lightbox] pixel worker: creating Worker  +${(performance.now()-_t0).toFixed(1)}ms`);
+        const worker = new Worker('./pixel-worker.js', { type: 'module' });
+        console.log(`[lightbox] pixel worker: starting fetch  +${(performance.now()-_t0).toFixed(1)}ms`);
+        fetch(entry.fullUrl)
+            .then(r => {
+                console.log(`[lightbox] pixel worker: fetch headers received  +${(performance.now()-_t0).toFixed(1)}ms`);
+                return r.arrayBuffer();
+            })
+            .then(ab => {
+                console.log(`[lightbox] pixel worker: arrayBuffer ready (${(ab.byteLength/1024).toFixed(0)} KB), posting to worker  +${(performance.now()-_t0).toFixed(1)}ms`);
+                worker.postMessage({ arrayBuffer: ab }, [ab]);
+            });
+        worker.onmessage = e => {
+            console.log(`[lightbox] pixel worker: worker message received (${e.data.error ? 'error' : 'ok'})  +${(performance.now()-_t0).toFixed(1)}ms`);
+            worker.terminate();
+            resolve(e.data.error ? null : e.data);
+        };
+        worker.onerror = (err) => {
+            console.warn(`[lightbox] pixel worker: worker error  +${(performance.now()-_t0).toFixed(1)}ms`, err);
+            worker.terminate();
+            resolve(null);
+        };
+    });
+    lightboxPixelBuffers.set(item.id, p);
+}
 
 function openLightbox(batchItems, startIndex) {
     if (lightboxOpen) closeLightbox();
+
+    const _lbT0 = performance.now();
+    console.log(`[lightbox] openLightbox() called  +0ms`);
 
     lightboxOpen = true;
     lightboxBatch = batchItems;
@@ -916,37 +786,13 @@ function openLightbox(batchItems, startIndex) {
     lightboxSdrActive = false;
 
     // Pre-create blob URLs for all images in the batch — reused on every navigation, no re-creation
-    const lightboxBlobUrls = new Map();
+    lightboxBlobUrls = new Map();
     lightboxBatch.forEach(item => {
-        const blob = item.blob instanceof Blob ? item.blob : new Blob([item.blob], { type: item.type });
-        // Full-res URL (used for pixel-worker and save)
-        const fullUrl = URL.createObjectURL(blob);
-        lightboxCreatedUrls.push(fullUrl);
-        // Display URL — use WebP thumbnail if available, otherwise full blob
-        const displayBlob = (item.thumbBlob instanceof Blob) ? item.thumbBlob : blob;
-        const displayUrl = displayBlob === blob ? fullUrl : URL.createObjectURL(displayBlob);
-        if (displayBlob !== blob) lightboxCreatedUrls.push(displayUrl);
-        // SDR URL — pre-created so the toggle is instant, no DB fetch on click
-        let sdrUrl = null;
-        if (item.sdrBlob instanceof Blob) {
-            sdrUrl = URL.createObjectURL(item.sdrBlob);
-            lightboxCreatedUrls.push(sdrUrl);
-        }
-        lightboxBlobUrls.set(item.id, { url: displayUrl, fullUrl, blob, sdrUrl });
-    });
-
-    // Pre-decode pixel buffers for all images in batch
-    lightboxBatch.forEach(item => {
-        if (!lightboxPixelBuffers.has(item.id)) {
-            const { blob } = lightboxBlobUrls.get(item.id);
-            const p = new Promise(resolve => {
-                const worker = new Worker('./pixel-worker.js');
-                blob.arrayBuffer().then(ab => worker.postMessage({ arrayBuffer: ab }, [ab]));
-                worker.onmessage = e => { worker.terminate(); resolve(e.data.error ? null : e.data); };
-                worker.onerror   = () => { worker.terminate(); resolve(null); };
-            });
-            lightboxPixelBuffers.set(item.id, p);
-        }
+        // Use Cloudinary URLs directly — no blob URL creation needed
+        const fullUrl    = item.hdrUrl;
+        const displayUrl = item.thumbUrl || item.hdrUrl;
+        const sdrUrl     = item.sdrUrl   || null;
+        lightboxBlobUrls.set(item.id, { url: displayUrl, fullUrl, blob: null, sdrUrl });
     });
 
     // Build overlay
@@ -1032,7 +878,10 @@ function openLightbox(batchItems, startIndex) {
 
     const imgEl = document.createElement('img');
     imgEl.className = 'lightbox-image';
-    imageWrapper.appendChild(imgEl);
+    const imgContainer = document.createElement('div');
+    imgContainer.className = 'lightbox-image-container';
+    imgContainer.appendChild(imgEl);
+    imageWrapper.appendChild(imgContainer);
 
     // ── Toolbar ──
     const toolbar = document.createElement('div');
@@ -1175,7 +1024,7 @@ function openLightbox(batchItems, startIndex) {
             panLastX = -1; panLastY = -1;
             imgEl.style.transform = `scale(1)`;
             imgEl.style.transformOrigin = '50% 50%';
-            zoomTooltip.textContent = `1.0× zoom`;
+            zoomTooltip.innerHTML = `<svg class="zoom-icon" xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>1.0× zoom`;
             return;
         }
 
@@ -1197,11 +1046,11 @@ function openLightbox(batchItems, startIndex) {
             scrollZoomVelocity = 0;
             scrollZoomRaf = null;
             applyTransform();
-            zoomTooltip.textContent = `${scrollZoomCurrent.toFixed(1)}× zoom`;
+            zoomTooltip.innerHTML = `<svg class="zoom-icon" xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>${scrollZoomCurrent.toFixed(1)}× zoom`;
             return;
         }
         applyTransform();
-        zoomTooltip.textContent = `${scrollZoomCurrent.toFixed(1)}× zoom`;
+        zoomTooltip.innerHTML = `<svg class="zoom-icon" xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>${scrollZoomCurrent.toFixed(1)}× zoom`;
         scrollZoomRaf = requestAnimationFrame(scrollZoomTick);
     }
 
@@ -1239,7 +1088,7 @@ function openLightbox(batchItems, startIndex) {
         imgEl.style.transform = `scale(${currentZoomScale})`;
         imgEl.style.cursor = 'zoom-out';
         imgEl.classList.add('lightbox-image-zooming');
-        zoomTooltip.textContent = `${currentZoomScale.toFixed(1)}× zoom`;
+        zoomTooltip.innerHTML = `<svg class="zoom-icon" xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>${currentZoomScale.toFixed(1)}× zoom`;
         zoomTooltip.style.display = 'block';
     }
 
@@ -1254,7 +1103,7 @@ function openLightbox(batchItems, startIndex) {
         applyTransform();
         imgEl.style.cursor = 'zoom-out';
         imgEl.classList.add('lightbox-image-zooming');
-        zoomTooltip.textContent = `${scrollZoomCurrent.toFixed(1)}× zoom`;
+        zoomTooltip.innerHTML = `<svg class="zoom-icon" xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>${scrollZoomCurrent.toFixed(1)}× zoom`;
         zoomTooltip.style.display = 'block';
     }
 
@@ -1323,7 +1172,7 @@ function openLightbox(batchItems, startIndex) {
             imgEl.style.transition = 'transform 80ms cubic-bezier(0.2, 0, 0, 1)';
             imgEl.style.transformOrigin = `${(e.clientX / window.innerWidth) * 100}% ${(e.clientY / window.innerHeight) * 100}%`;
             imgEl.style.transform = `scale(${currentZoomScale})`;
-            zoomTooltip.textContent = `${currentZoomScale.toFixed(1)}× zoom`;
+            zoomTooltip.innerHTML = `<svg class="zoom-icon" xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>${currentZoomScale.toFixed(1)}× zoom`;
         } else {
             // Scroll-to-zoom: inject velocity, RAF loop coasts to stop
             const step = e.deltaY > 0 ? -0.1 : 0.1;
@@ -1442,10 +1291,10 @@ function openLightbox(batchItems, startIndex) {
         if (!imageWrapper.querySelector('.inline-comparison-slider')) {
             if (globalDetailsEnabled) {
                 imgEl.classList.add('cursor-nit-hunt');
-                imageWrapper.classList.add('cursor-nit-hunt');
+                imgContainer.classList.add('cursor-nit-hunt');
             } else {
                 imgEl.classList.remove('cursor-nit-hunt');
-                imageWrapper.classList.remove('cursor-nit-hunt');
+                imgContainer.classList.remove('cursor-nit-hunt');
             }
         }
         if (!globalDetailsEnabled) return;
@@ -1453,18 +1302,18 @@ function openLightbox(batchItems, startIndex) {
         if (!lbPixelBuffer) {
             const item = lightboxBatch[lightboxIndex];
             const bufPromise = lightboxPixelBuffers.get(item.id);
-            if (bufPromise) lbPixelBuffer = await bufPromise;
+            if (bufPromise) {
+                nitTooltip.style.display = 'block';
+                nitTooltip.innerHTML = _NIT_LOADING_HTML;
+                lbPixelBuffer = await bufPromise;
+            }
         }
         if (!lbPixelBuffer || !lbMouseInside || !globalDetailsEnabled) return;
         nitTooltip.style.display = 'block';
         const { imgX, imgY } = cursorToPixel(lastCursorX, lastCursorY, lbPixelBuffer);
         lbLastPixelX = imgX; lbLastPixelY = imgY;
         const { rNits, gNits, bNits, luminance, gamut } = getNitsAtPixel(lbPixelBuffer, imgX, imgY);
-        const fmt = v => v < 10 ? v.toFixed(2) : Math.round(v);
-        nitTooltip.innerHTML = (() => {
-                            const gamutColor = gamut === 'BT.2020' ? '#f472b6' : gamut === 'DCI-P3' ? '#34d399' : '#60a5fa';
-                            return `<div style="display:grid;grid-template-columns:auto auto minmax(3.5em,auto);gap:0 4px;align-items:baseline;"><span>Nits</span><span>:</span><span style="text-align:right;">${fmt(luminance)}</span><span style="color:#ff6b6b;">R</span><span style="color:#ff6b6b;">:</span><span style="text-align:right;color:#ff6b6b;">${fmt(rNits)}</span><span style="color:#51cf66;">G</span><span style="color:#51cf66;">:</span><span style="text-align:right;color:#51cf66;">${fmt(gNits)}</span><span style="color:#4dabf7;">B</span><span style="color:#4dabf7;">:</span><span style="text-align:right;color:#4dabf7;">${fmt(bNits)}</span><span style="color:${gamutColor};margin-top:3px;grid-column:1/-1;border-top:1px solid rgba(255,255,255,0.08);padding-top:3px;">${gamut}</span></div>`;
-                        })();
+        nitTooltip.innerHTML = _nitTooltipHTML(rNits, gNits, bNits, luminance, gamut);
     });
     imgEl.addEventListener('mouseleave', () => {
         lbMouseInside = false;
@@ -1481,17 +1330,15 @@ function openLightbox(batchItems, startIndex) {
             if (imgX === lbLastPixelX && imgY === lbLastPixelY) return;
             lbLastPixelX = imgX; lbLastPixelY = imgY;
             const { rNits, gNits, bNits, luminance, gamut } = getNitsAtPixel(lbPixelBuffer, imgX, imgY);
-            const fmt = v => v < 10 ? v.toFixed(2) : Math.round(v);
-            nitTooltip.innerHTML = (() => {
-                            const gamutColor = gamut === 'BT.2020' ? '#f472b6' : gamut === 'DCI-P3' ? '#34d399' : '#60a5fa';
-                            return `<div style="display:grid;grid-template-columns:auto auto minmax(3.5em,auto);gap:0 4px;align-items:baseline;"><span>Nits</span><span>:</span><span style="text-align:right;">${fmt(luminance)}</span><span style="color:#ff6b6b;">R</span><span style="color:#ff6b6b;">:</span><span style="text-align:right;color:#ff6b6b;">${fmt(rNits)}</span><span style="color:#51cf66;">G</span><span style="color:#51cf66;">:</span><span style="text-align:right;color:#51cf66;">${fmt(gNits)}</span><span style="color:#4dabf7;">B</span><span style="color:#4dabf7;">:</span><span style="text-align:right;color:#4dabf7;">${fmt(bNits)}</span><span style="color:${gamutColor};margin-top:3px;grid-column:1/-1;border-top:1px solid rgba(255,255,255,0.08);padding-top:3px;">${gamut}</span></div>`;
-                        })();
+            nitTooltip.innerHTML = _nitTooltipHTML(rNits, gNits, bNits, luminance, gamut);
         });
     });
 
     // ── Render function (called on init and navigation) ──
     async function renderLightboxImage() {
         const item = lightboxBatch[lightboxIndex];
+        const _t0 = performance.now();
+        console.log(`[lightbox] renderLightboxImage() start  +0ms`);
         lbPixelBuffer = null; // reset buffer for new image
         lbLastPixelX = -1; lbLastPixelY = -1;
 
@@ -1529,7 +1376,22 @@ function openLightbox(batchItems, startIndex) {
 
         // Update main image — always use full-res original for accurate HDR rendering
         const { url: displayUrl, fullUrl, blob } = lightboxBlobUrls.get(item.id);
+        console.log(`[lightbox] setting imgEl.src  +${(performance.now()-_t0).toFixed(1)}ms`);
+        imgEl.onerror = () => console.warn(`[lightbox] imgEl onerror fired  +${(performance.now()-_t0).toFixed(1)}ms`);
         imgEl.src = fullUrl;
+        imgEl.onload = () => console.log(`[lightbox] imgEl onload fired  +${(performance.now()-_t0).toFixed(1)}ms`);
+        // Reuse in-flight hover prefetch promise if available, otherwise start fresh.
+        const _existingDecode = _decodePromises.get(fullUrl);
+        if (_existingDecode) {
+            _existingDecode.then(() => {
+                console.log(`[lightbox] imgEl.decode() complete (bitmap ready to paint)  +${(performance.now()-_t0).toFixed(1)}ms (reused prefetch)`);
+            }).catch(() => {});
+        } else {
+            const p = imgEl.decode().then(() => {
+                console.log(`[lightbox] imgEl.decode() complete (bitmap ready to paint)  +${(performance.now()-_t0).toFixed(1)}ms`);
+            }).catch(() => {});
+            _decodePromises.set(fullUrl, p);
+        }
 
         // Register in imageWrappers for global details system
         imageWrappers.set(item.id, { wrapper: imageWrapper, metadata: item.metadata || null, imageItem: item, compareButton: compareBtn });
@@ -1579,39 +1441,58 @@ function openLightbox(batchItems, startIndex) {
         nextBtn.style.opacity = lightboxIndex === lightboxBatch.length - 1 ? '0.25' : '1';
         nextBtn.style.pointerEvents = lightboxIndex === lightboxBatch.length - 1 ? 'none' : '';
 
-        // Pre-decode pixel buffer eagerly; once ready, show tooltip if mouse is already inside
+        // Start pixel decode only if analysis tool is active
+        if (globalDetailsEnabled) _startPixelDecode(item);
         const bufPromise = lightboxPixelBuffers.get(item.id);
-        if (bufPromise) bufPromise.then(buf => {
-            lbPixelBuffer = buf;
-            if (lbMouseInside && globalDetailsEnabled && buf) {
+        if (bufPromise) {
+            // Show loading indicator immediately if mouse is already over the image
+            if (lbMouseInside && globalDetailsEnabled) {
                 nitTooltip.style.display = 'block';
-                const { imgX, imgY } = cursorToPixel(lastCursorX, lastCursorY, buf);
-                lbLastPixelX = imgX; lbLastPixelY = imgY;
-                const { rNits, gNits, bNits, luminance, gamut } = getNitsAtPixel(buf, imgX, imgY);
-                const fmt = v => v < 10 ? v.toFixed(2) : Math.round(v);
-                nitTooltip.innerHTML = (() => {
-                            const gamutColor = gamut === 'BT.2020' ? '#f472b6' : gamut === 'DCI-P3' ? '#34d399' : '#60a5fa';
-                            return `<div style="display:grid;grid-template-columns:auto auto minmax(3.5em,auto);gap:0 4px;align-items:baseline;"><span>Nits</span><span>:</span><span style="text-align:right;">${fmt(luminance)}</span><span style="color:#ff6b6b;">R</span><span style="color:#ff6b6b;">:</span><span style="text-align:right;color:#ff6b6b;">${fmt(rNits)}</span><span style="color:#51cf66;">G</span><span style="color:#51cf66;">:</span><span style="text-align:right;color:#51cf66;">${fmt(gNits)}</span><span style="color:#4dabf7;">B</span><span style="color:#4dabf7;">:</span><span style="text-align:right;color:#4dabf7;">${fmt(bNits)}</span><span style="color:${gamutColor};margin-top:3px;grid-column:1/-1;border-top:1px solid rgba(255,255,255,0.08);padding-top:3px;">${gamut}</span></div>`;
-                        })();
+                nitTooltip.innerHTML = _NIT_LOADING_HTML;
             }
-        });
+            bufPromise.then(buf => {
+                lbPixelBuffer = buf;
+                if (lbMouseInside && globalDetailsEnabled && buf) {
+                    nitTooltip.style.display = 'block';
+                    const { imgX, imgY } = cursorToPixel(lastCursorX, lastCursorY, buf);
+                    lbLastPixelX = imgX; lbLastPixelY = imgY;
+                    const { rNits, gNits, bNits, luminance, gamut } = getNitsAtPixel(buf, imgX, imgY);
+                    nitTooltip.innerHTML = _nitTooltipHTML(rNits, gNits, bNits, luminance, gamut);
+                }
+            });
+        }
 
-        // Pre-load adjacent images at full res so navigation feels instant
-        [-1, 1].forEach(offset => {
-            const adj = lightboxBatch[lightboxIndex + offset];
-            if (adj) {
-                const adjEntry = lightboxBlobUrls.get(adj.id);
-                if (adjEntry) { const p = new Image(); p.src = adjEntry.fullUrl; }
-            }
+        // Pre-decode adjacent images outward from current index so navigation feels instant.
+        // Works outward (next, prev, next+1, prev-1…) with a staggered delay so we don't
+        // saturate the GPU decoder all at once. Capped at 6 neighbours total.
+        const _adjOrder = [];
+        for (let d = 1; d <= 3; d++) {
+            if (lightboxIndex + d < lightboxBatch.length) _adjOrder.push(lightboxIndex + d);
+            if (lightboxIndex - d >= 0)                   _adjOrder.push(lightboxIndex - d);
+        }
+        _adjOrder.slice(0, 6).forEach((i, slot) => {
+            const adj = lightboxBatch[i];
+            if (!adj) return;
+            const adjEntry = lightboxBlobUrls.get(adj.id);
+            if (!adjEntry) return;
+            if (_decodePromises.has(adjEntry.fullUrl)) return; // already decoded or in flight
+            setTimeout(() => {
+                const p = new Image();
+                p.src = adjEntry.fullUrl;
+                const _pt = performance.now();
+                const promise = p.decode().then(() => {
+                    console.log(`[lightbox] adj prefetch decode done: "${adj.name}" (slot ${slot+1})  +${(performance.now()-_pt).toFixed(1)}ms`);
+                }).catch(() => {});
+                _decodePromises.set(adjEntry.fullUrl, promise);
+            }, slot * 150); // stagger by 150 ms per slot
         });
 
         // Wire up action buttons for current item
         saveBtn.onclick = async () => {
             try {
                 const isSdr = lightboxSdrToggleActive;
-                const { sdrUrl, fullUrl, blob } = lightboxBlobUrls.get(item.id);
-                const saveBlob = isSdr && item.sdrBlob instanceof Blob ? item.sdrBlob : blob;
-                const saveBlobUrl = isSdr && sdrUrl ? sdrUrl : fullUrl;
+                const { sdrUrl, fullUrl } = lightboxBlobUrls.get(item.id);
+                const saveUrl = isSdr && sdrUrl ? sdrUrl : fullUrl;
                 const dotIdx = item.name.lastIndexOf('.');
                 const base = dotIdx >= 0 ? item.name.slice(0, dotIdx) : item.name;
                 const ext  = dotIdx >= 0 ? item.name.slice(dotIdx).toLowerCase() : '';
@@ -1628,11 +1509,13 @@ function openLightbox(batchItems, startIndex) {
                     };
                     const types = EXT_TYPES[saveExt];
                     const fh = await window.showSaveFilePicker({ suggestedName: saveName, ...(types ? { types, excludeAcceptAllOption: true } : {}) });
+                    const saveResp = await fetch(saveUrl);
+                    const saveBlob = await saveResp.blob();
                     const w = await fh.createWritable();
                     await w.write(saveBlob);
                     await w.close();
                 } else {
-                    downloadFile(saveBlobUrl, saveName);
+                    downloadFile(saveUrl, saveName);
                 }
             } catch (err) {
                 if (err.name !== 'AbortError') console.error('Save error:', err);
@@ -1798,7 +1681,7 @@ function openLightbox(batchItems, startIndex) {
                     }
                 }
 
-                imageWrapper.appendChild(slider);
+                imgContainer.appendChild(slider);
 
                 // Re-position whenever zoom mode is toggled (class change on imgEl)
                 const zoomClassObserver = new MutationObserver(positionSlider);
@@ -1867,7 +1750,7 @@ function openLightbox(batchItems, startIndex) {
                     imgEl.style.transition = '';
                     imgEl.style.transform = 'scale(1)';
                     imgEl.style.transformOrigin = '50% 50%';
-                    zoomTooltip.textContent = '1.0× zoom';
+                    zoomTooltip.innerHTML = `<svg class="zoom-icon" xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>1.0× zoom`;
                 }
 
                 sdrImg.src = sdrUrl;
@@ -1943,7 +1826,14 @@ function openLightbox(batchItems, startIndex) {
 
     rebuildFilmstrip();
     _lightboxRender = renderLightboxImage;
-    renderLightboxImage();
+    // Defer the first render by one rAF so the browser paints the overlay shell
+    // immediately — the image load + decode then starts on the next frame rather
+    // than blocking the initial open.
+    console.log(`[lightbox] overlay built, queuing rAF  +${(performance.now()-_lbT0).toFixed(1)}ms`);
+    requestAnimationFrame(() => {
+        console.log(`[lightbox] rAF fired → renderLightboxImage()  +${(performance.now()-_lbT0).toFixed(1)}ms`);
+        renderLightboxImage();
+    });
 
     // Store cleanup ref on overlay for closeLightbox
     overlay._cleanupMouseUp = _mouseUpLightbox;
@@ -2248,7 +2138,7 @@ function showMetadataOverlay(filename, metadata, imageWrapper) {
     let panelRows = '';
 
     // File Info (top section)
-    panelRows += `<div class="imo-section-title" style="color:#aaa;">File Info</div>`;
+    panelRows += `<div class="imo-section-title imo-section-title--file">File Info</div>`;
     panelRows += imoRow('Resolution', metadata.resolution);
     panelRows += imoRow('Aspect', getAspectRatioLabel(metadata.width, metadata.height));
     panelRows += imoRow('Size', formatFileSize(metadata.fileSize));
@@ -2262,7 +2152,7 @@ function showMetadataOverlay(filename, metadata, imageWrapper) {
 
     // HDR Metadata
     if (metadata.hdr) {
-        panelRows += `<div class="imo-section-title" style="color:#2b6cff;margin-top:8px;">HDR Metadata</div>`;
+        panelRows += `<div class="imo-section-title imo-section-title--hdr">HDR Metadata</div>`;
         panelRows += imoRow('Bit Depth', metadata.hdr.bitDepth);
         if (metadata.hdr.gamma && metadata.hdr.gamma !== 'Not specified' && metadata.hdr.gamma !== 'HDR transfer function') {
             panelRows += imoRow('Gamma', metadata.hdr.gamma);
@@ -2278,23 +2168,23 @@ function showMetadataOverlay(filename, metadata, imageWrapper) {
         const maxCLLvalue = tc === 16 || tc === 18
             ? `${metadata.luminanceStats.maxCLL.toFixed(2)} cd/m²`
             : `${(metadata.luminanceStats.maxCLL / 80).toFixed(3)} (${metadata.luminanceStats.maxCLL.toFixed(2)} cd/m²)`;
-        panelRows += `<div class="imo-section-title" style="color:#51cf66;margin-top:8px;">Luminance</div>`;
+        panelRows += `<div class="imo-section-title imo-section-title--luminance">Luminance</div>`;
         panelRows += imoRow(maxCLLlabel, maxCLLvalue);
         panelRows += imoRow('Max', `${metadata.luminanceStats.maxLuminance.toFixed(2)} cd/m²`);
         panelRows += imoRow('Avg', `${metadata.luminanceStats.avgLuminance.toFixed(2)} cd/m²`);
         panelRows += imoRow('Min', `${metadata.luminanceStats.minLuminance.toFixed(2)} cd/m²`);
     } else if (!metadata.hdr) {
-        panelRows += `<div class="imo-section-title" style="color:#51cf66;margin-top:8px;">Luminance</div>`;
-        panelRows += `<div class="imo-row" style="color:#666;font-size:11px;">Not available for this file type</div>`;
+        panelRows += `<div class="imo-section-title imo-section-title--luminance">Luminance</div>`;
+        panelRows += `<div class="imo-row imo-row--unavailable">Not available for this file type</div>`;
     }
 
     // Gamut
     if (metadata.gamutCoverage) {
         if (metadata.gamutCoverage.narrowSource) {
-            panelRows += `<div class="imo-section-title" style="color:#a78bfa;margin-top:8px;">Gamut</div>`;
-            panelRows += `<div class="imo-row" style="color:#666;font-size:11px;">Wide-gamut analysis requires a BT.2020 or P3 source</div>`;
+            panelRows += `<div class="imo-section-title imo-section-title--gamut">Gamut</div>`;
+            panelRows += `<div class="imo-row imo-row--unavailable">Wide-gamut analysis requires a BT.2020 or P3 source</div>`;
         } else {
-            panelRows += `<div class="imo-section-title" style="color:#a78bfa;margin-top:8px;">Gamut</div>`;
+            panelRows += `<div class="imo-section-title imo-section-title--gamut">Gamut</div>`;
             panelRows += imoGamutRow('Rec. 709', metadata.gamutCoverage.rec709, '#60a5fa');
             panelRows += imoGamutRow('DCI-P3',   metadata.gamutCoverage.p3,    '#34d399');
             panelRows += imoGamutRow('BT.2020',  metadata.gamutCoverage.bt2020,'#f472b6');
@@ -2312,7 +2202,10 @@ function showMetadataOverlay(filename, metadata, imageWrapper) {
         </div>
     `;
 
-    imageWrapper.appendChild(overlay);
+    // Append to the image container so the overlay is bounded to the image area,
+    // not the full wrapper (which includes the header above the image).
+    const imgContainer = imageWrapper.querySelector('.lightbox-image-container') || imageWrapper;
+    imgContainer.appendChild(overlay);
 
     const panel = overlay.querySelector('.imo-panel');
     // Set grab cursor as inline style — beats inherited cursor-nit-hunt from parent wrapper
@@ -3043,6 +2936,38 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // Clean up URLs when page unloads
+// Re-decode the current lightbox image (and neighbours) when the window becomes visible again.
+// The GPU discards decoded bitmaps on minimize, so we kick off decode proactively
+// while the OS is still compositing the window restore — by the time the first
+// paint lands the bitmap is ready.
+document.addEventListener('visibilitychange', () => {
+    if (document.hidden || !lightboxOpen) return;
+
+    // GPU dropped all bitmaps on minimize — clear stale promises so we re-decode fresh.
+    _decodePromises.clear();
+
+    // Build outward priority list: current first, then next/prev alternating outward
+    const indices = [lightboxIndex];
+    for (let d = 1; d < lightboxBatch.length; d++) {
+        if (lightboxIndex + d < lightboxBatch.length) indices.push(lightboxIndex + d);
+        if (lightboxIndex - d >= 0)                   indices.push(lightboxIndex - d);
+    }
+
+    indices.forEach((i, slot) => {
+        const entry = lightboxBlobUrls.get(lightboxBatch[i]?.id);
+        if (!entry) return;
+        setTimeout(() => {
+            const _t = performance.now();
+            const p = new Image();
+            p.src = entry.fullUrl;
+            const promise = p.decode().then(() => {
+                console.log(`[lightbox] visibility restore decode complete: "${lightboxBatch[i].name}" (slot ${slot})  +${(performance.now()-_t).toFixed(1)}ms`);
+            }).catch(() => {});
+            _decodePromises.set(entry.fullUrl, promise);
+        }, slot * 150);
+    });
+});
+
 window.addEventListener('beforeunload', () => {
     revokeAllUrls();
 });

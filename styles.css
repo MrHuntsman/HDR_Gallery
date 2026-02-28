@@ -578,6 +578,11 @@ button.button-active:active {
     padding-top: 4px;
 }
 
+.cursor-tooltip-zoom {
+    display: flex;
+    align-items: center;
+}
+
 /* ─── HDR / SDR Comparison Slider ──────────────────────────────────────────── */
 
 .inline-comparison-slider {
@@ -681,6 +686,7 @@ button.button-active:active {
     z-index: 20;
     pointer-events: none;
     border-radius: 4px;
+    overflow: hidden;
 }
 
 /* Flex container for initial panel placement — panels go position:absolute on first drag */
@@ -1395,6 +1401,15 @@ button.button-active:active {
     justify-content: center;
 }
 
+.lightbox-image-container {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    align-self: center;
+    flex-shrink: 0;
+}
+
 .lightbox-image {
     max-width: calc(100vw - 120px);
     max-height: calc(100vh - 48px - 80px - 64px - 44px - 8px);
@@ -1650,3 +1665,62 @@ button.button-active:active {
     text-transform: uppercase;
     color: #555;
 }
+/* ─── Nit Tooltip ────────────────────────────────────────────────────────────── */
+
+.nit-grid {
+    display: grid;
+    grid-template-columns: auto auto minmax(3.5em, auto);
+    gap: 0 4px;
+    align-items: baseline;
+}
+
+.nit-grid__val  { text-align: right; }
+.nit-grid__r    { color: #ff6b6b; }
+.nit-grid__g    { color: #51cf66; }
+.nit-grid__b    { color: #4dabf7; }
+
+.nit-grid__gamut {
+    margin-top: 3px;
+    grid-column: 1 / -1;
+    border-top: 1px solid rgba(255,255,255,0.08);
+    padding-top: 3px;
+}
+
+.nit-grid__gamut--709  { color: #60a5fa; }
+.nit-grid__gamut--p3   { color: #34d399; }
+.nit-grid__gamut--2020 { color: #f472b6; }
+
+/* ─── Nit Loading ────────────────────────────────────────────────────────────── */
+
+.nit-loading {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.nit-loading__spinner {
+    animation: import-spin 0.65s linear infinite;
+    flex-shrink: 0;
+}
+
+.nit-loading__text {
+    color: #ffffff;
+    font-size: 0.85em;
+}
+
+/* ─── Zoom Icon ──────────────────────────────────────────────────────────────── */
+
+.zoom-icon {
+    display: inline-block;
+    vertical-align: -2px;
+    margin-right: 4px;
+    flex-shrink: 0;
+}
+
+/* ─── IMO Section Titles ─────────────────────────────────────────────────────── */
+
+.imo-section-title--file      { color: #aaa; }
+.imo-section-title--hdr       { color: #2b6cff; margin-top: 8px; }
+.imo-section-title--luminance { color: #51cf66; margin-top: 8px; }
+.imo-section-title--gamut     { color: #a78bfa; margin-top: 8px; }
+.imo-row--unavailable         { color: #666; font-size: 11px; }
