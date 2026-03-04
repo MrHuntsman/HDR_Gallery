@@ -206,6 +206,13 @@ function toggleGlobalDetailsMode() {
     updateAllDetailButtons(globalDetailsEnabled);
 
     if (globalDetailsEnabled) {
+        // If lightbox is open, cancel SDR slider first (mutually exclusive)
+        if (lightboxOpen && lightboxSdrActive) {
+            // Find the active SDR Slider button and click it — reuses its own teardown logic
+            const sdrSliderBtn = Array.from(document.querySelectorAll('.lightbox-toolbar button'))
+                .find(b => b.classList.contains('button-active') && b.textContent.includes('SDR'));
+            if (sdrSliderBtn) sdrSliderBtn.click();
+        }
         // If lightbox is open, start pixel decode now and show details
         if (lightboxOpen) {
             const imgEl = document.querySelector('.lightbox-image');
@@ -233,6 +240,8 @@ function toggleGlobalDetailsMode() {
         // Hide all details overlays
         hideAllDetailsOverlays();
         nitTooltip.style.display = 'none';
+        // If currently zoomed, start the idle-hide timer now that analysis mode is off
+        if (lightboxOpen && _lightboxResetZoomIdleTimer) _lightboxResetZoomIdleTimer();
     }
 }
 
@@ -240,10 +249,10 @@ function updateAllDetailButtons(isActive) {
     document.querySelectorAll('.detail-button').forEach(button => {
         if (isActive) {
             button.classList.add('button-active');
-            button.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg> <u>A</u>nalysis Tool';
+            button.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg><span class="btn-label"> <u>A</u>nalysis Tool</span>';
         } else {
             button.classList.remove('button-active');
-            button.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" opacity="0.3"></path><circle cx="12" cy="12" r="3"></circle></svg> <u>A</u>nalysis Tool';
+            button.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" opacity="0.3"></path><circle cx="12" cy="12" r="3"></circle></svg><span class="btn-label"> <u>A</u>nalysis Tool</span>';
         }
     });
 }
@@ -433,12 +442,12 @@ async function processFiles(selectedFiles) {
     }
 
     // Show import modal — user picks HDR type and game name before processing begins
-    const importResult = await showImportModal(allowedFiles.length);
+    const importResult = await showImportModal(allowedFiles.length, allowedFiles);
     if (importResult === null) {
         fileInput.value = '';
         return; // User cancelled
     }
-    const { hdrType, gameName: importGameName } = importResult;
+    const { hdrType, gameName: importGameName, spoiler: importSpoiler, additionalInfo: importAdditionalInfo } = importResult;
 
     const toConvert = allowedFiles.filter(needsConversion);
     const native = allowedFiles.filter(f => !needsConversion(f));
@@ -539,7 +548,7 @@ async function processFiles(selectedFiles) {
             _renderProgress();
             const _tSave = performance.now();
             console.log('[processFiles] storing — thumb:', thumbBlob?.size, 'sdr:', sdrBlob?.size);
-            await addImageFile(hdrFile, metadata, sdrBlob, hdrType, batchId, thumbBlob, importGameName);
+            await addImageFile(hdrFile, metadata, sdrBlob, hdrType, batchId, thumbBlob, importGameName, importSpoiler, importAdditionalInfo);
             _importLog(`addImageFile: ${hdrFile.name}`, _tSave);
         }
         _importLog('total import', _importT0);
@@ -655,7 +664,10 @@ function createCollageCard(batchItems) {
 
     const titleEl = document.createElement('span');
     titleEl.className = 'collage-title';
-    titleEl.textContent = batchItems[0].gameName || 'Unknown Game';
+    const _titleName = batchItems[0].gameName || 'Unknown Game';
+    const _titleCount = batchItems.length;
+    titleEl.textContent = _titleName;
+    const _countBadge = document.createElement('span');
     header.appendChild(titleEl);
 
     card.appendChild(header);
@@ -681,6 +693,25 @@ function createCollageCard(batchItems) {
         img.draggable = false;
 
         cell.appendChild(img);
+
+        // Spoiler overlay — click label to reveal, remembered in localStorage
+        if (item.spoiler) {
+            const _spoilerKey = `spoiler-revealed:${item.id}`;
+            const _alreadyRevealed = localStorage.getItem(_spoilerKey) === '1';
+            cell.classList.add('collage-cell-spoiler');
+            if (_alreadyRevealed) cell.classList.add('spoiler-revealed');
+            const spoilerLabel = document.createElement('div');
+            spoilerLabel.className = 'collage-spoiler-label';
+            const spoilerSpan = document.createElement('span');
+            spoilerSpan.textContent = 'SPOILER';
+            spoilerLabel.appendChild(spoilerSpan);
+            cell.appendChild(spoilerLabel);
+            spoilerLabel.addEventListener('click', (e) => {
+                e.stopPropagation();
+                cell.classList.add('spoiler-revealed');
+                localStorage.setItem(_spoilerKey, '1');
+            });
+        }
 
         // On hover, pre-decode the full HDR image so the bitmap is GPU-ready
         // before the user clicks — eliminates the visible decode stall in the lightbox.
@@ -730,11 +761,11 @@ let lightboxBatch = [];
 let lightboxIndex = 0;
 let lightboxPixelBuffer = null;
 let lightboxPixelBuffers = new Map(); // imageId → buffer promise
-let lightboxIsZooming = false;
-let lightboxZoomScale = CONFIG.zoomScale;
 let lightboxSdrActive = false;
 let lightboxSdrToggleActive = false; // full SDR view (no slider)
 let lightboxBlobUrls = new Map(); // imageId → { url, fullUrl, blob, sdrUrl }
+// Hook exposed by openLightbox so toggleGlobalDetailsMode can trigger the idle timer
+let _lightboxResetZoomIdleTimer = null;
 
 // Shared decode promise cache — keyed by hdrUrl so hover prefetch and lightbox
 // can share the same in-flight promise rather than racing each other.
@@ -813,6 +844,7 @@ function openLightbox(batchItems, startIndex) {
             e.target !== imageArea &&
             e.target !== filmstrip &&
             e.target !== toolbar &&
+            e.target !== toolbarInner &&
             e.target !== toolbarLeft &&
             e.target !== toolbarRight
         );
@@ -844,7 +876,7 @@ function openLightbox(batchItems, startIndex) {
         }
 
         // Toolbar: close when clicking the empty left/center areas, not the buttons
-        if ((e.target === toolbar || e.target === toolbarLeft || e.target === toolbarRight) && !toolbarCenter.contains(e.target)) {
+        if (e.target === toolbar || e.target === toolbarLeft || e.target === toolbarRight) {
             closeLightbox();
         }
     });
@@ -870,8 +902,19 @@ function openLightbox(batchItems, startIndex) {
     imageHeaderTitle.className = 'lightbox-image-header-title';
     imageHeaderTitle.textContent = lightboxBatch[startIndex].gameName || 'Unknown Game';
 
+    const imageHeaderSubtitle = document.createElement('div');
+    imageHeaderSubtitle.className = 'lightbox-image-header-subtitle';
+    const _initAdditionalInfo = lightboxBatch[startIndex].additionalInfo || '';
+    imageHeaderSubtitle.textContent = _initAdditionalInfo;
+    imageHeaderSubtitle.style.display = _initAdditionalInfo ? '' : 'none';
+
+    const imageHeaderTitleWrap = document.createElement('div');
+    imageHeaderTitleWrap.className = 'lightbox-image-header-title-wrap';
+    imageHeaderTitleWrap.appendChild(imageHeaderTitle);
+    imageHeaderTitleWrap.appendChild(imageHeaderSubtitle);
+
     imageHeader.appendChild(imageHeaderTags);
-    imageHeader.appendChild(imageHeaderTitle);
+    imageHeader.appendChild(imageHeaderTitleWrap);
     const imageHeaderRight = document.createElement('div');
     imageHeader.appendChild(imageHeaderRight);
     imageWrapper.appendChild(imageHeader);
@@ -888,21 +931,52 @@ function openLightbox(batchItems, startIndex) {
     toolbar.className = 'lightbox-toolbar';
     overlay.appendChild(toolbar);
 
-    // Left side: tags
+    // Inner wrapper — constrains buttons to the same width as the image area
+    const toolbarInner = document.createElement('div');
+    toolbarInner.className = 'lightbox-toolbar-inner';
+    toolbar.appendChild(toolbarInner);
+
+    // Left side: view/analysis buttons
     const toolbarLeft = document.createElement('div');
     toolbarLeft.className = 'lightbox-toolbar-left';
-    toolbar.appendChild(toolbarLeft);
+    toolbarInner.appendChild(toolbarLeft);
 
-    // Center: game name
-    const toolbarCenter = document.createElement('div');
-    toolbarCenter.className = 'lightbox-toolbar-center';
-    
-    toolbar.appendChild(toolbarCenter);
-
-    // Right side: action buttons
+    // Right side: edit/manage buttons
     const toolbarRight = document.createElement('div');
     toolbarRight.className = 'lightbox-toolbar-right';
-    toolbar.appendChild(toolbarRight);
+    toolbarInner.appendChild(toolbarRight);
+
+    // ── Copy Link button (right side) ──
+    const copyLinkBtn = document.createElement('button');
+    copyLinkBtn.className = 'button-secondary lightbox-copy-link-btn';
+    copyLinkBtn.title = 'Copy link to this image';
+    copyLinkBtn.title = 'Copy link';
+    copyLinkBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg><span class="btn-label"> Copy Link</span>';
+    copyLinkBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const item = lightboxBatch[lightboxIndex];
+        if (!item) return;
+        const url = new URL(location.href);
+        url.search = '';
+        url.searchParams.set('img', item.id);
+        navigator.clipboard.writeText(url.toString()).then(() => {
+            copyLinkBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg><span class="btn-label"> Copied!</span>';
+            copyLinkBtn.classList.add('lightbox-copy-link-btn--copied');
+            setTimeout(() => {
+                copyLinkBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg><span class="btn-label"> Copy Link</span>';
+                copyLinkBtn.classList.remove('lightbox-copy-link-btn--copied');
+            }, 2000);
+        }).catch(() => {
+            const ta = document.createElement('textarea');
+            ta.value = url.toString();
+            ta.style.position = 'fixed'; ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            ta.remove();
+        });
+    });
+    toolbarRight.appendChild(copyLinkBtn);
 
     // ── Filmstrip ──
     const filmstrip = document.createElement('div');
@@ -940,112 +1014,157 @@ function openLightbox(batchItems, startIndex) {
     const triggerFade = () => requestAnimationFrame(() => { overlay.style.opacity = '1'; });
     preloader.decode().then(triggerFade).catch(triggerFade); // catch: fade in anyway if decode fails
 
-    // ── Action buttons ──
-
+    // ── LEFT side: Analysis Tool, SDR Slider, SDR Toggle, Save ──
     const detailsBtn = document.createElement('button');
     detailsBtn.className = 'button-secondary detail-button' + (globalDetailsEnabled ? ' button-active' : '');
     detailsBtn.innerHTML = globalDetailsEnabled
-        ? '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg> <u>A</u>nalysis Tool'
-        : '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" opacity="0.3"></path><circle cx="12" cy="12" r="3"></circle></svg> <u>A</u>nalysis Tool';
+        ? '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg><span class="btn-label"> <u>A</u>nalysis Tool</span>'
+        : '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" opacity="0.3"></path><circle cx="12" cy="12" r="3"></circle></svg><span class="btn-label"> <u>A</u>nalysis Tool</span>';
+    detailsBtn.title = 'Analysis Tool (A)';
     detailsBtn.onclick = () => toggleGlobalDetailsMode();
-    toolbarCenter.appendChild(detailsBtn);
+    toolbarLeft.appendChild(detailsBtn);
 
     const compareBtn = document.createElement('button');
     compareBtn.className = 'button-secondary';
-    compareBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 6H3"/><path d="m7 12-4-4 4-4"/><path d="M3 18h18"/><path d="m17 12 4 4-4 4"/></svg> <u>S</u>DR Slider';
-    toolbarCenter.appendChild(compareBtn);
+    compareBtn.title = 'SDR Slider (S)';
+    compareBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 6H3"/><path d="m7 12-4-4 4-4"/><path d="M3 18h18"/><path d="m17 12 4 4-4 4"/></svg><span class="btn-label"> <u>S</u>DR Slider</span>';
+    toolbarLeft.appendChild(compareBtn);
 
     const sdrToggleBtn = document.createElement('button');
     sdrToggleBtn.className = 'button-secondary';
-    sdrToggleBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg> SDR Toggle';
-    toolbarCenter.appendChild(sdrToggleBtn);
+    sdrToggleBtn.title = 'SDR Toggle';
+    sdrToggleBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg><span class="btn-label"> SDR Toggle</span>';
+    toolbarLeft.appendChild(sdrToggleBtn);
 
     const saveBtn = document.createElement('button');
     saveBtn.className = 'button-secondary';
-    saveBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Save HDR Image';
+    saveBtn.title = 'Save image';
+    saveBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg><span class="btn-label"> Save HDR Image</span>';
 
     function updateSaveBtn() {
         const isSdr = lightboxSdrToggleActive;
-        saveBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Save ${isSdr ? 'SDR' : 'HDR'} Image`;
+        saveBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg><span class="btn-label"> Save ${isSdr ? 'SDR' : 'HDR'} Image</span>`;
     }
-    toolbarCenter.appendChild(saveBtn);
+    toolbarLeft.appendChild(saveBtn);
 
+    // ── RIGHT side: Edit, Delete, Delete All, Copy Link (already appended above) ──
     const editBtn = document.createElement('button');
     editBtn.className = 'button-secondary';
-    editBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg> Edit';
-    toolbarCenter.appendChild(editBtn);
+    editBtn.title = 'Edit details';
+    editBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg><span class="btn-label"> Edit</span>';
+    toolbarRight.insertBefore(editBtn, copyLinkBtn);
 
     const deleteBtn = document.createElement('button');
     deleteBtn.className = 'button-danger';
-    deleteBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg> Delete';
-    toolbarCenter.appendChild(deleteBtn);
+    deleteBtn.title = 'Delete image';
+    deleteBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg><span class="btn-label"> Delete</span>';
+    toolbarRight.insertBefore(deleteBtn, copyLinkBtn);
 
     const deleteAllBtn = document.createElement('button');
     deleteAllBtn.className = 'button-danger';
-    deleteAllBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg> Delete All';
+    deleteAllBtn.title = 'Delete all in batch';
+    deleteAllBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg><span class="btn-label"> Delete All</span>';
     // Only show if batch has more than one image
     deleteAllBtn.style.display = lightboxBatch.length > 1 ? '' : 'none';
-    toolbarCenter.appendChild(deleteAllBtn);
+    toolbarRight.insertBefore(deleteAllBtn, copyLinkBtn);
 
     // ── Hold-to-zoom ──
     let isZooming = false;
     let currentZoomScale = CONFIG.zoomScale;
 
     // ── Scroll-to-zoom (velocity + friction momentum) ──
-    let scrollZoomCurrent = 1;    // displayed scale (the only truth)
-    let scrollZoomVelocity = 0;   // scale units per frame
-    let scrollZoomOriginX = 50;
-    let scrollZoomOriginY = 50;
+    // Uses translate(tx, ty) scale(S) with transformOrigin: 0 0 — the standard
+    // Photoshop/Figma model. State: (zoomTx, zoomTy, scrollZoomCurrent).
+    // On each scroll event: tx_new = cx - (cx - tx) * (S_new / S_old)
+    let scrollZoomCurrent = 1;
+    let scrollZoomVelocity = 0;
+    let zoomTx = 0, zoomTy = 0;         // translate in viewport-px
+    let zoomCursorX = 0, zoomCursorY = 0; // cursor position at last scroll event (px)
     let scrollZoomRaf = null;
-    const SCROLL_FRICTION = 0.92; // velocity multiplied each frame (0=instant stop, 1=no stop)
+    const SCROLL_FRICTION = 0.92;
+    let naturalRect = null; // bounding rect of the image before entering zoom (for FLIP animations)
 
-    // Snap gate: hold at 1x when first entering zoom so it's easy to land there
+    // Pan drag state
+    let isPanning = false;
+    let panStartX = 0, panStartY = 0;
+    let panStartTx = 0, panStartTy = 0;
+    // Pan momentum
+    let panVelX = 0, panVelY = 0;
+    let panLastX = 0, panLastY = 0;
+    let panLastTime = 0;
+    let panMomentumRaf = null;
+    const PAN_FRICTION = 0.88;
+
+    // Snap gate
     const SNAP_GATE_MS    = 300;
     const SNAP_GATE_TICKS = 2;
     let snapGateActive  = false;
     let snapGateExpiry  = 0;
     let snapGateTicks   = 0;
-    let panLastX = -1, panLastY = -1;
-    let panX = 0, panY = 0; // translate offset (viewport-%) — kept separate from transformOrigin
 
-    // scrollZoomScale is now just an alias for scrollZoomCurrent (kept for compat with reset code)
-    Object.defineProperty(window, '_szs_compat', { value: true });
+    function applyTransform() {
+        imgEl.style.transformOrigin = '0 0';
+        imgEl.style.transform = `translate(${zoomTx}px, ${zoomTy}px) scale(${scrollZoomCurrent})`;
+    }
+
+    // Recompute tx/ty so the point (cx, cy) in viewport-px stays fixed
+    // when scale changes from oldScale to scrollZoomCurrent.
+    function anchorZoomAtCursor(cx, cy, oldScale) {
+        zoomTx = cx - (cx - zoomTx) * (scrollZoomCurrent / oldScale);
+        zoomTy = cy - (cy - zoomTy) * (scrollZoomCurrent / oldScale);
+    }
+
+    // Returns the rendered content rect of the image when position:fixed; width:100vw; height:100vh; object-fit:contain
+    function _getFitRect() {
+        const natW = imgEl.naturalWidth  || 1;
+        const natH = imgEl.naturalHeight || 1;
+        const vw = window.innerWidth, vh = window.innerHeight;
+        const s  = Math.min(vw / natW, vh / natH);
+        const fw = natW * s, fh = natH * s;
+        return { left: (vw - fw) / 2, top: (vh - fh) / 2, width: fw, height: fh };
+    }
+
+    // Computes translate+scale (transformOrigin:0 0) so that the fixed fullscreen image
+    // visually occupies nr (the natural flexbox rect), used for FLIP enter/exit animations.
+    function _flipTransform(nr) {
+        const f = _getFitRect();
+        const s = nr.width / f.width;
+        return { tx: nr.left - f.left * s, ty: nr.top - f.top * s, s };
+    }
 
     function scrollZoomTick() {
+        imgEl.style.transition = 'none';
         scrollZoomVelocity *= SCROLL_FRICTION;
         const next = scrollZoomCurrent + scrollZoomVelocity;
 
-        // Hit the floor — clamp to 1x, kill velocity, but stay in zoom mode
         if (next <= 1) {
             scrollZoomCurrent = 1;
             scrollZoomVelocity = 0;
             scrollZoomRaf = null;
-            panX = 0; panY = 0;
-            panLastX = -1; panLastY = -1;
-            imgEl.style.transform = `scale(1)`;
-            imgEl.style.transformOrigin = '50% 50%';
+            zoomTx = 0; zoomTy = 0;
+            applyTransform();
             zoomTooltip.innerHTML = `<svg class="zoom-icon" xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>1.0× zoom`;
             return;
         }
 
-        const prevScale = scrollZoomCurrent;
+        const oldScale = scrollZoomCurrent;
         scrollZoomCurrent = Math.min(10, next);
-
-        // Settled at ceiling
         if (scrollZoomCurrent >= 10) scrollZoomVelocity = 0;
-
-        // Zoom toward cursor: shift pan so the point under cursor stays fixed.
-        // scrollZoomOriginX/Y holds the cursor position in viewport-% at scroll time.
-        const cx = scrollZoomOriginX - 50; // cursor offset from centre (viewport-%)
-        const cy = scrollZoomOriginY - 50;
-        const scaleFactor = scrollZoomCurrent / prevScale;
-        panX = cx + (panX - cx) * scaleFactor;
-        panY = cy + (panY - cy) * scaleFactor;
+        anchorZoomAtCursor(zoomCursorX, zoomCursorY, oldScale);
 
         if (Math.abs(scrollZoomVelocity) < 0.0002) {
             scrollZoomVelocity = 0;
             scrollZoomRaf = null;
+            if (scrollZoomCurrent < 1.05) {
+                scrollZoomCurrent = 1;
+                zoomTx = 0; zoomTy = 0;
+                applyTransform();
+                imgEl.style.cursor = 'zoom-out';
+                zoomTooltip.innerHTML = `<svg class="zoom-icon" xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>1.0× zoom`;
+                return;
+            }
             applyTransform();
+            imgEl.style.cursor = 'grab';
             zoomTooltip.innerHTML = `<svg class="zoom-icon" xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>${scrollZoomCurrent.toFixed(1)}× zoom`;
             return;
         }
@@ -1056,153 +1175,226 @@ function openLightbox(batchItems, startIndex) {
 
     function startScrollZoomRaf() {
         imgEl.style.transition = 'none';
-        imgEl.style.cursor = 'zoom-out';
+        imgEl.style.cursor = scrollZoomCurrent > 1 ? 'grab' : 'zoom-out';
         imgEl.classList.add('lightbox-image-zooming');
-        zoomTooltip.style.display = 'block';
+        if (lbMouseInside) zoomTooltip.style.display = 'block';
+        _resetZoomIdleTimer();
         if (!scrollZoomRaf) scrollZoomRaf = requestAnimationFrame(scrollZoomTick);
     }
 
-    function applyScrollZoom(instant) {
-        if (scrollZoomScale <= 1 && instant) {
-            // Instant reset (e.g. click to exit)
-            if (scrollZoomRaf) { cancelAnimationFrame(scrollZoomRaf); scrollZoomRaf = null; } if (panRaf) { cancelAnimationFrame(panRaf); panRaf = null; } panLastX = -1; panLastY = -1; panX = 0; panY = 0;
+    // Animate zoom out: FLIP back to natural position, then restore normal layout
+    function startZoomExit() {
+        if (scrollZoomRaf) { cancelAnimationFrame(scrollZoomRaf); scrollZoomRaf = null; }
+        if (panMomentumRaf) { cancelAnimationFrame(panMomentumRaf); panMomentumRaf = null; }
+        scrollZoomVelocity = 0;
+        const DURATION = 200;
+        imgEl.style.cursor = globalDetailsEnabled ? '' : 'zoom-in';
+        zoomTooltip.style.display = 'none';
+        _clearZoomIdleTimer();
+
+        let finished = false;
+        const finish = () => {
+            if (finished) return;
+            finished = true;
             scrollZoomCurrent = 1;
-            imgEl.style.transition = `transform ${CONFIG.zoomOutMs}ms cubic-bezier(0.2, 0, 0, 1)`;
-            imgEl.style.transform = '';
-            imgEl.style.cursor = globalDetailsEnabled ? '' : 'zoom-in';
+            zoomTx = 0; zoomTy = 0;
+            naturalRect = null;
             imgEl.classList.remove('lightbox-image-zooming');
-            zoomTooltip.style.display = 'none';
-            const cleanup = () => { imgEl.style.transition = ''; imgEl.style.transformOrigin = ''; imgEl.removeEventListener('transitionend', cleanup); };
-            imgEl.addEventListener('transitionend', cleanup);
+            imgEl.style.transition = '';
+            imgEl.style.transform = '';
+            imgEl.style.transformOrigin = '';
+        };
+
+        if (naturalRect) {
+            // FLIP exit: animate current transform → natural image position, then remove class
+            const { tx, ty, s } = _flipTransform(naturalRect);
+            imgEl.style.transition = `transform ${DURATION}ms cubic-bezier(0.25, 0, 0, 1)`;
+            imgEl.style.transformOrigin = '0 0';
+            imgEl.style.transform = `translate(${tx}px,${ty}px) scale(${s})`;
+            imgEl.addEventListener('transitionend', function h() { finish(); imgEl.removeEventListener('transitionend', h); });
+            setTimeout(finish, DURATION + 50);
         } else {
-            startScrollZoomRaf();
+            // Fallback (no naturalRect): snap out instantly
+            finish();
         }
     }
 
+
     function applyZoom(clientX, clientY, animate) {
-        // While zooming, imgEl is position:fixed and fills the viewport
-        const pctX = (clientX / window.innerWidth)  * 100;
-        const pctY = (clientY / window.innerHeight) * 100;
+        zoomCursorX = clientX;
+        zoomCursorY = clientY;
         imgEl.style.transition = animate ? `transform ${CONFIG.zoomInMs}ms cubic-bezier(0.2, 0, 0, 1)` : 'none';
-        imgEl.style.transformOrigin = `${pctX}% ${pctY}%`;
-        imgEl.style.transform = `scale(${currentZoomScale})`;
         imgEl.style.cursor = 'zoom-out';
         imgEl.classList.add('lightbox-image-zooming');
+        // For hold-zoom, anchor at cursor using currentZoomScale
+        const ox = clientX, oy = clientY;
+        const tx = ox - ox * currentZoomScale;
+        const ty = oy - oy * currentZoomScale;
+        imgEl.style.transformOrigin = '0 0';
+        imgEl.style.transform = `translate(${tx}px, ${ty}px) scale(${currentZoomScale})`;
         zoomTooltip.innerHTML = `<svg class="zoom-icon" xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>${currentZoomScale.toFixed(1)}× zoom`;
-        zoomTooltip.style.display = 'block';
+        if (lbMouseInside) zoomTooltip.style.display = 'block';
     }
 
     function releaseZoom() {
         isZooming = false;
-        // Hand off to scroll zoom at the current hold-zoom scale so it stays in zoom mode
         scrollZoomCurrent = currentZoomScale;
         scrollZoomVelocity = 0;
         currentZoomScale = CONFIG.zoomScale;
-        panX = 0; panY = 0;
+        // Sync tx/ty from the hold-zoom position so scroll-zoom picks up seamlessly
+        zoomTx = zoomCursorX - zoomCursorX * scrollZoomCurrent;
+        zoomTy = zoomCursorY - zoomCursorY * scrollZoomCurrent;
         imgEl.style.transition = 'none';
         applyTransform();
         imgEl.style.cursor = 'zoom-out';
         imgEl.classList.add('lightbox-image-zooming');
         zoomTooltip.innerHTML = `<svg class="zoom-icon" xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>${scrollZoomCurrent.toFixed(1)}× zoom`;
-        zoomTooltip.style.display = 'block';
+        if (lbMouseInside) zoomTooltip.style.display = 'block';
+        _resetZoomIdleTimer();
+    }
+
+    function startPanMomentum() {
+        if (panMomentumRaf) { cancelAnimationFrame(panMomentumRaf); panMomentumRaf = null; }
+        // Scale px/ms velocity to px/frame (~16ms)
+        let vx = panVelX * 16;
+        let vy = panVelY * 16;
+        function tick() {
+            vx *= PAN_FRICTION;
+            vy *= PAN_FRICTION;
+            if (Math.abs(vx) < 0.1 && Math.abs(vy) < 0.1) { panMomentumRaf = null; return; }
+            zoomTx += vx;
+            zoomTy += vy;
+            applyTransform();
+            panMomentumRaf = requestAnimationFrame(tick);
+        }
+        panMomentumRaf = requestAnimationFrame(tick);
     }
 
     imgEl.addEventListener('mousedown', (e) => {
         if (e.button !== 0) return;
-        if (globalDetailsEnabled) return;
         if (imageWrapper.querySelector('.inline-comparison-slider')) return;
-        // If in zoom mode (any scale), click exits
         if (imgEl.classList.contains('lightbox-image-zooming')) {
-            scrollZoomVelocity = 0;
-            scrollZoomCurrent = 1;
-            if (scrollZoomRaf) { cancelAnimationFrame(scrollZoomRaf); scrollZoomRaf = null; } if (panRaf) { cancelAnimationFrame(panRaf); panRaf = null; } panLastX = -1; panLastY = -1; panX = 0; panY = 0;
-            imgEl.style.transition = `transform ${CONFIG.zoomOutMs}ms cubic-bezier(0.2, 0, 0, 1)`;
-            imgEl.style.transform = '';
-            imgEl.style.cursor = globalDetailsEnabled ? '' : 'zoom-in';
-            imgEl.classList.remove('lightbox-image-zooming');
-            zoomTooltip.style.display = 'none';
-            const cleanup = () => { imgEl.style.transition = ''; imgEl.style.transformOrigin = ''; imgEl.removeEventListener('transitionend', cleanup); };
-            imgEl.addEventListener('transitionend', cleanup);
-            e.preventDefault();
+            if (scrollZoomCurrent > 1) {
+                // Cancel any ongoing pan momentum
+                if (panMomentumRaf) { cancelAnimationFrame(panMomentumRaf); panMomentumRaf = null; }
+                if (scrollZoomRaf) { cancelAnimationFrame(scrollZoomRaf); scrollZoomRaf = null; }
+                scrollZoomVelocity = 0;
+                isPanning = true;
+                panStartX = e.clientX; panStartY = e.clientY;
+                panStartTx = zoomTx;   panStartTy = zoomTy;
+                panVelX = 0; panVelY = 0;
+                panLastX = e.clientX; panLastY = e.clientY; panLastTime = performance.now();
+                imgEl.style.cursor = 'grabbing';
+                e.preventDefault();
+            } else if (!globalDetailsEnabled) {
+                // At 1x — click exits (only outside analysis mode)
+                scrollZoomVelocity = 0;
+                startZoomExit();
+                e.preventDefault();
+            }
             return;
         }
-        // Otherwise enter zoom mode at 1x
+        if (globalDetailsEnabled) return;
+        // Otherwise enter zoom mode — FLIP enter animation
         isZooming = true;
         currentZoomScale = 1;
-        applyZoom(e.clientX, e.clientY, true);
+        zoomCursorX = e.clientX; zoomCursorY = e.clientY;
+
+        // Capture natural rect, switch to fixed, apply FLIP inverse instantly
+        naturalRect = imgEl.getBoundingClientRect();
+        const { tx: ftx, ty: fty, s: fs } = _flipTransform(naturalRect);
+        imgEl.classList.add('lightbox-image-zooming');
+        imgEl.style.cursor = 'zoom-out';
+        imgEl.style.transition = 'none';
+        imgEl.style.transformOrigin = '0 0';
+        imgEl.style.transform = `translate(${ftx}px,${fty}px) scale(${fs})`;
+        zoomTooltip.innerHTML = `<svg class="zoom-icon" xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>1.0× zoom`;
+        if (lbMouseInside) zoomTooltip.style.display = 'block';
+
+        // Next frame: animate to scale(1) anchored at cursor
+        requestAnimationFrame(() => {
+            imgEl.style.transition = `transform ${CONFIG.zoomInMs}ms cubic-bezier(0.2, 0, 0, 1)`;
+            const ox = e.clientX, oy = e.clientY;
+            imgEl.style.transform = `translate(${ox - ox * currentZoomScale}px,${oy - oy * currentZoomScale}px) scale(${currentZoomScale})`;
+        });
         e.preventDefault();
     });
-    // Pan state — translate offset in viewport-% units, origin fixed at 50% 50%
-    let panRaf = null;
-
-    function applyTransform() {
-        imgEl.style.transformOrigin = '50% 50%';
-        imgEl.style.transform = `translate(${panX}%, ${panY}%) scale(${scrollZoomCurrent})`;
-    }
-
     imgEl.addEventListener('mousemove', (e) => {
         if (isZooming) { applyZoom(e.clientX, e.clientY, false); return; }
-        if (imgEl.classList.contains('lightbox-image-zooming') && !isZooming && scrollZoomCurrent > 1.01) {
-            // Pan sensitivity decreases with zoom
-            const sensitivity = scrollZoomCurrent <= 5 ? 1 : Math.max(0.2, 5 / scrollZoomCurrent);
-            const mouseX = (e.clientX / window.innerWidth)  * 100;
-            const mouseY = (e.clientY / window.innerHeight) * 100;
-            if (panLastX === -1) { panLastX = mouseX; panLastY = mouseY; }
-            const dx = (mouseX - panLastX) * sensitivity;
-            const dy = (mouseY - panLastY) * sensitivity;
-            panLastX = mouseX;
-            panLastY = mouseY;
-            panX -= dx;
-            panY -= dy;
+        if (isPanning) {
+            zoomTx = panStartTx + (e.clientX - panStartX);
+            zoomTy = panStartTy + (e.clientY - panStartY);
             imgEl.style.transition = 'none';
             applyTransform();
-        } else {
-            // Not panning — reset so re-entry never has a stale delta or offset
-            panLastX = -1;
-            panLastY = -1;
-            panX = 0;
-            panY = 0;
+            _resetZoomIdleTimer();
+            // Track velocity for momentum
+            const now = performance.now();
+            const dt = now - panLastTime;
+            if (dt > 0 && dt < 64) { // ignore big gaps (e.g. tab switch)
+                panVelX = (e.clientX - panLastX) / dt;
+                panVelY = (e.clientY - panLastY) / dt;
+            }
+            panLastX = e.clientX; panLastY = e.clientY; panLastTime = now;
+            return;
+        }
+        // Update grab cursor based on zoom level when hovering
+        if (imgEl.classList.contains('lightbox-image-zooming') && !globalDetailsEnabled) {
+            imgEl.style.cursor = scrollZoomCurrent > 1 ? 'grab' : 'zoom-out';
         }
     });
     imgEl.addEventListener('wheel', (e) => {
         e.preventDefault();
         if (isZooming) {
             // Hold-to-zoom: adjust scale while holding mouse button
+            const oldScale = currentZoomScale;
             currentZoomScale = Math.max(1, Math.min(10, currentZoomScale + (e.deltaY > 0 ? -0.5 : 0.5)));
-            imgEl.style.transition = 'transform 80ms cubic-bezier(0.2, 0, 0, 1)';
-            imgEl.style.transformOrigin = `${(e.clientX / window.innerWidth) * 100}% ${(e.clientY / window.innerHeight) * 100}%`;
-            imgEl.style.transform = `scale(${currentZoomScale})`;
+            applyZoom(e.clientX, e.clientY, false);
             zoomTooltip.innerHTML = `<svg class="zoom-icon" xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>${currentZoomScale.toFixed(1)}× zoom`;
         } else {
             // Scroll-to-zoom: inject velocity, RAF loop coasts to stop
             const step = e.deltaY > 0 ? -0.1 : 0.1;
-            // Scrolling down at 1x — exit zoom
+            // Scrolling down at 1x — exit zoom with transition
             if (step < 0 && scrollZoomCurrent <= 1 && imgEl.classList.contains('lightbox-image-zooming')) {
                 scrollZoomVelocity = 0;
-                scrollZoomCurrent = 1;
                 snapGateActive = false;
-                if (scrollZoomRaf) { cancelAnimationFrame(scrollZoomRaf); scrollZoomRaf = null; } if (panRaf) { cancelAnimationFrame(panRaf); panRaf = null; } panLastX = -1; panLastY = -1; panX = 0; panY = 0;
-                imgEl.style.transition = `transform ${CONFIG.zoomOutMs}ms cubic-bezier(0.2, 0, 0, 1)`;
-                imgEl.style.transform = '';
-                imgEl.style.cursor = globalDetailsEnabled ? '' : 'zoom-in';
-                imgEl.classList.remove('lightbox-image-zooming');
-                zoomTooltip.style.display = 'none';
-                const cleanup = () => { imgEl.style.transition = ''; imgEl.style.transformOrigin = ''; imgEl.removeEventListener('transitionend', cleanup); };
-                imgEl.addEventListener('transitionend', cleanup);
+                startZoomExit();
                 return;
             }
             // Only zoom in if already in zoom mode or scrolling up (entering zoom)
             if (step < 0 && !imgEl.classList.contains('lightbox-image-zooming')) return;
 
-            // On first scroll-up that enters zoom, open the 1x snap gate
+            // Capture cursor for anchor calculation
+            zoomCursorX = e.clientX;
+            zoomCursorY = e.clientY;
+
+            // On first scroll-up that enters zoom — FLIP enter animation
             if (!imgEl.classList.contains('lightbox-image-zooming')) {
                 snapGateActive = true;
                 snapGateExpiry = performance.now() + SNAP_GATE_MS;
                 snapGateTicks  = 0;
-                scrollZoomOriginX = (e.clientX / window.innerWidth)  * 100;
-                scrollZoomOriginY = (e.clientY / window.innerHeight) * 100;
-                panX = 0; panY = 0;
-                startScrollZoomRaf();
+                zoomTx = 0; zoomTy = 0; scrollZoomCurrent = 1;
+
+                // Capture natural rect, switch to fixed layout, apply FLIP inverse instantly
+                naturalRect = imgEl.getBoundingClientRect();
+                const { tx: ftx, ty: fty, s: fs } = _flipTransform(naturalRect);
+                imgEl.classList.add('lightbox-image-zooming');
+                imgEl.style.cursor = 'zoom-out';
+                if (lbMouseInside) zoomTooltip.style.display = 'block';
+                imgEl.style.transition = 'none';
+                imgEl.style.transformOrigin = '0 0';
+                imgEl.style.transform = `translate(${ftx}px,${fty}px) scale(${fs})`;
+
+                // Double-rAF: first frame commits the FLIP inverse, second starts the transition
+                requestAnimationFrame(() => {
+                    requestAnimationFrame(() => {
+                        imgEl.style.transition = `transform 180ms cubic-bezier(0.2, 0, 0, 1)`;
+                        imgEl.style.transform = 'translate(0px,0px) scale(1)';
+                        setTimeout(() => {
+                            imgEl.style.transition = 'none';
+                            startScrollZoomRaf();
+                        }, 190);
+                    });
+                });
                 return;
             }
 
@@ -1217,15 +1409,24 @@ function openLightbox(batchItems, startIndex) {
                 }
             }
 
-            // Capture cursor position for zoom-toward-cursor in scrollZoomTick
-            scrollZoomOriginX = (e.clientX / window.innerWidth)  * 100;
-            scrollZoomOriginY = (e.clientY / window.innerHeight) * 100;
             scrollZoomVelocity += step;
             startScrollZoomRaf();
         }
     }, { passive: false });
 
-    const _mouseUpLightbox = (e) => { if (e.button === 0 && isZooming) releaseZoom(); };
+    const _mouseUpLightbox = (e) => {
+        if (e.button === 0 && isZooming) { releaseZoom(); return; }
+        if (e.button === 0 && isPanning) {
+            isPanning = false;
+            const dist = Math.hypot(e.clientX - panStartX, e.clientY - panStartY);
+            if (dist < 5) {
+                startZoomExit();
+            } else {
+                imgEl.style.cursor = scrollZoomCurrent > 1 ? 'grab' : 'zoom-out';
+                startPanMomentum();
+            }
+        }
+    };
     document.addEventListener('mouseup', _mouseUpLightbox);
 
     // ── Per-pixel nit-hunt ──
@@ -1236,10 +1437,8 @@ function openLightbox(batchItems, startIndex) {
     let lbMouseInside = false;
 
     // ── Zoom-aware cursor → pixel coordinate mapping ──
-    // When zoomed, imgEl is position:fixed full-viewport with object-fit:contain,
-    // so getBoundingClientRect() returns the whole viewport, not the actual image rect.
-    // We must compute the letterboxed image rect manually and then invert the
-    // translate(panX%, panY%) scale(scrollZoomCurrent) transform.
+    // Invert transform: transformOrigin:0 0, translate(zoomTx,zoomTy) scale(S)
+    // viewport point P → pre-transform point: P_pre = (P - translate) / S
     function cursorToPixel(clientX, clientY, buf) {
         const natW = imgEl.naturalWidth  || buf.width;
         const natH = imgEl.naturalHeight || buf.height;
@@ -1247,37 +1446,21 @@ function openLightbox(batchItems, startIndex) {
         if (imgEl.classList.contains('lightbox-image-zooming')) {
             const vw = window.innerWidth;
             const vh = window.innerHeight;
-
-            // Step 1: compute the un-zoomed letterboxed rect (object-fit:contain inside viewport)
             const fitScale = Math.min(vw / natW, vh / natH);
             const fitW = natW * fitScale;
             const fitH = natH * fitScale;
             const fitLeft = (vw - fitW) / 2;
             const fitTop  = (vh - fitH) / 2;
 
-            // Step 2: invert the CSS transform: translate(panX%, panY%) scale(scrollZoomCurrent)
-            // The transform origin is 50% 50% of the viewport.
-            // A point P in viewport space maps to image space as:
-            //   P_img = (P_viewport - viewport_centre - pan_px) / scrollZoomCurrent + viewport_centre
-            // where pan_px = panX/100 * vw, panY/100 * vh
-            const cx = vw / 2;
-            const cy = vh / 2;
-            const panPxX = (panX / 100) * vw;
-            const panPxY = (panY / 100) * vh;
-
-            const unscaledX = (clientX - cx - panPxX) / scrollZoomCurrent + cx;
-            const unscaledY = (clientY - cy - panPxY) / scrollZoomCurrent + cy;
-
-            // Step 3: map from viewport coords back to pixel coords via the fit rect
-            const imgX = Math.floor((unscaledX - fitLeft) * (natW / fitW));
-            const imgY = Math.floor((unscaledY - fitTop)  * (natH / fitH));
+            const S = scrollZoomCurrent;
+            const preX = (clientX - zoomTx) / S;
+            const preY = (clientY - zoomTy) / S;
 
             return {
-                imgX: Math.max(0, Math.min(natW - 1, imgX)),
-                imgY: Math.max(0, Math.min(natH - 1, imgY)),
+                imgX: Math.max(0, Math.min(natW - 1, Math.floor((preX - fitLeft) * (natW / fitW)))),
+                imgY: Math.max(0, Math.min(natH - 1, Math.floor((preY - fitTop)  * (natH / fitH)))),
             };
         } else {
-            // Not zoomed — simple mapping via getBoundingClientRect()
             const rect = imgEl.getBoundingClientRect();
             return {
                 imgX: Math.max(0, Math.min(natW - 1, Math.floor((clientX - rect.left) * (natW / rect.width)))),
@@ -1286,8 +1469,50 @@ function openLightbox(batchItems, startIndex) {
         }
     }
 
+    // ── Idle cursor/tooltip hide in zoom mode ──
+    // After 2s without mouse movement while zoomed (and NOT in analysis mode),
+    // hide the cursor and the zoom tooltip. Any movement restores them.
+    let _zoomIdleTimer = null;
+
+    function _clearZoomIdleTimer() {
+        if (_zoomIdleTimer) { clearTimeout(_zoomIdleTimer); _zoomIdleTimer = null; }
+    }
+
+    function _showZoomCursor() {
+        imgEl.style.cursor = 'zoom-out';
+        if (imgEl.classList.contains('lightbox-image-zooming')) {
+            zoomTooltip.style.display = 'block';
+        }
+    }
+
+    function _hideZoomCursor() {
+        imgEl.style.cursor = 'none';
+        zoomTooltip.style.display = 'none';
+    }
+
+    function _resetZoomIdleTimer() {
+        // Only active in zoom mode and NOT in analysis mode
+        if (!imgEl.classList.contains('lightbox-image-zooming') || globalDetailsEnabled) return;
+        _clearZoomIdleTimer();
+        _showZoomCursor();
+        _zoomIdleTimer = setTimeout(() => {
+            if (imgEl.classList.contains('lightbox-image-zooming') && !globalDetailsEnabled && lbMouseInside) {
+                _hideZoomCursor();
+            }
+        }, 1000);
+    }
+    _lightboxResetZoomIdleTimer = _resetZoomIdleTimer;
+
     imgEl.addEventListener('mouseenter', async () => {
         lbMouseInside = true;
+        // Restore zoom tooltip if we're currently in zoom mode
+        if (imgEl.classList.contains('lightbox-image-zooming')) {
+            if (globalDetailsEnabled) {
+                _showZoomCursor();
+            } else {
+                _resetZoomIdleTimer();
+            }
+        }
         if (!imageWrapper.querySelector('.inline-comparison-slider')) {
             if (globalDetailsEnabled) {
                 imgEl.classList.add('cursor-nit-hunt');
@@ -1317,10 +1542,16 @@ function openLightbox(batchItems, startIndex) {
     });
     imgEl.addEventListener('mouseleave', () => {
         lbMouseInside = false;
+        _clearZoomIdleTimer();
+        // Restore cursor style so it's normal outside the image
+        imgEl.style.cursor = '';
         nitTooltip.style.display = 'none';
+        zoomTooltip.style.display = 'none';
         lbLastPixelX = -1; lbLastPixelY = -1;
     });
     imgEl.addEventListener('mousemove', (e) => {
+        // Reset idle timer on any movement in zoom mode (not analysis mode)
+        _resetZoomIdleTimer();
         if (!lbPixelBuffer || !globalDetailsEnabled) return;
         if (lightboxSdrActive) return;
         lbRafPending = true;
@@ -1337,6 +1568,11 @@ function openLightbox(batchItems, startIndex) {
     // ── Render function (called on init and navigation) ──
     async function renderLightboxImage() {
         const item = lightboxBatch[lightboxIndex];
+        // Update the page URL so this image has a shareable link
+        const _shareUrl = new URL(location.href);
+        _shareUrl.search = '';
+        _shareUrl.searchParams.set('img', item.id);
+        history.replaceState(null, '', _shareUrl.toString());
         const _t0 = performance.now();
         console.log(`[lightbox] renderLightboxImage() start  +0ms`);
         lbPixelBuffer = null; // reset buffer for new image
@@ -1346,14 +1582,15 @@ function openLightbox(batchItems, startIndex) {
         isZooming = false;
         scrollZoomCurrent = 1;
         scrollZoomVelocity = 0;
-        scrollZoomOriginX = 50;
-        scrollZoomOriginY = 50;
-        if (scrollZoomRaf) { cancelAnimationFrame(scrollZoomRaf); scrollZoomRaf = null; } if (panRaf) { cancelAnimationFrame(panRaf); panRaf = null; } panLastX = -1; panLastY = -1; panX = 0; panY = 0;
+        zoomTx = 0; zoomTy = 0;
+        zoomCursorX = 0; zoomCursorY = 0;
+        if (scrollZoomRaf) { cancelAnimationFrame(scrollZoomRaf); scrollZoomRaf = null; } 
         imgEl.style.transform = '';
         imgEl.style.transformOrigin = '';
         imgEl.style.transition = '';
         imgEl.classList.remove('lightbox-image-zooming');
         zoomTooltip.style.display = 'none';
+        _clearZoomIdleTimer();
 
         // Close SDR slider if open
         const existingSlider = imageWrapper.querySelector('.inline-comparison-slider');
@@ -1363,7 +1600,7 @@ function openLightbox(batchItems, startIndex) {
         }
         lightboxSdrActive = false;
         compareBtn.classList.remove('button-active');
-        compareBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 6H3"/><path d="m7 12-4-4 4-4"/><path d="M3 18h18"/><path d="m17 12 4 4-4 4"/></svg> <u>S</u>DR Slider';
+        compareBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 6H3"/><path d="m7 12-4-4 4-4"/><path d="M3 18h18"/><path d="m17 12 4 4-4 4"/></svg><span class="btn-label"> <u>S</u>DR Slider</span>';
 
         // Reset SDR full-view toggle
         lightboxSdrToggleActive = false;
@@ -1413,6 +1650,9 @@ function openLightbox(batchItems, startIndex) {
         imageHeaderTags.innerHTML = '';
         imageHeaderRight.innerHTML = '';
         imageHeaderTitle.textContent = item.gameName || 'Unknown Game';
+        const _navAdditionalInfo = item.additionalInfo || '';
+        imageHeaderSubtitle.textContent = _navAdditionalInfo;
+        imageHeaderSubtitle.style.display = _navAdditionalInfo ? '' : 'none';
         const hdrTypeDef = HDR_TYPES.find(t => t.id === item.hdrType);
         let lbHdrLabel = null;
         let lbHdrClass = '';
@@ -1525,22 +1765,31 @@ function openLightbox(batchItems, startIndex) {
         editBtn.onclick = async () => {
             if (editBtn.disabled) return;
             editBtn.disabled = true;
-            const result = await showEditModal(item.hdrType, item.gameName);
+            const result = await showEditModal(item.hdrType, item.gameName, item.spoiler, item.thumbUrl || item.sdrUrl, item.additionalInfo);
             editBtn.disabled = false;
             if (result === null) return;
-            const { hdrType: newHdrType, gameName: newGameName } = result;
+            const { hdrType: newHdrType, gameName: newGameName, spoiler: newSpoiler, additionalInfo: newAdditionalInfo } = result;
             // Update all items in the batch in memory so navigation picks up the new name immediately
             lightboxBatch.forEach(batchItem => {
                 if (batchItem.batchId === item.batchId || batchItem.id === item.id) {
                     batchItem.gameName = newGameName;
                     batchItem.hdrType  = newHdrType;
+                    batchItem.spoiler  = newSpoiler;
+                }
+                if (batchItem.id === item.id) {
+                    batchItem.additionalInfo = newAdditionalInfo;
                 }
             });
             // Also update the toolbar center title which is set once on open
             imageHeaderTitle.textContent = newGameName || 'Unknown Game';
+            const _editAdditionalInfo = newAdditionalInfo || '';
+            imageHeaderSubtitle.textContent = _editAdditionalInfo;
+            imageHeaderSubtitle.style.display = _editAdditionalInfo ? '' : 'none';
             try {
                 await updateImageHdrType(item.id, newHdrType);
                 if (item.batchId) await updateBatchGameName(item.batchId, newGameName);
+                await updateBatchSpoiler(item.batchId, item.id, newSpoiler);
+                await updateAdditionalInfo(item.id, newAdditionalInfo);
                 await refreshGallery();
                 renderLightboxImage();
             } catch (err) { console.error('Edit error:', err); }
@@ -1595,7 +1844,18 @@ function openLightbox(batchItems, startIndex) {
             } catch (err) { console.error('Delete all error:', err); }
         };
 
-        compareBtn.onclick = () => {
+        compareBtn.onclick = (e) => {
+            // Cancel Analysis Tool if active — only when user-initiated (not programmatic click)
+            if (globalDetailsEnabled && e?.isTrusted) {
+                globalDetailsEnabled = false;
+                updateAllDetailButtons(false);
+                const imgElQ = document.querySelector('.lightbox-image');
+                if (imgElQ) imgElQ.classList.remove('cursor-nit-hunt');
+                const conQ = document.querySelector('.lightbox-image-container');
+                if (conQ) conQ.classList.remove('cursor-nit-hunt');
+                hideAllDetailsOverlays();
+                nitTooltip.style.display = 'none';
+            }
             // Close full SDR view if active — the two modes are mutually exclusive
             if (lightboxSdrToggleActive) {
                 const { fullUrl } = lightboxBlobUrls.get(item.id);
@@ -1610,7 +1870,7 @@ function openLightbox(batchItems, startIndex) {
                 existingSlider.remove();
                 lightboxSdrActive = false;
                 compareBtn.classList.remove('button-active');
-                compareBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 6H3"/><path d="m7 12-4-4 4-4"/><path d="M3 18h18"/><path d="m17 12 4 4-4 4"/></svg> <u>S</u>DR Slider';
+                compareBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 6H3"/><path d="m7 12-4-4 4-4"/><path d="M3 18h18"/><path d="m17 12 4 4-4 4"/></svg><span class="btn-label"> <u>S</u>DR Slider</span>';
                 // Restore analysis overlay and nit tooltip
                 const metaOverlay = imageWrapper.querySelector('.image-meta-overlay');
                 if (metaOverlay) metaOverlay.style.visibility = '';
@@ -1673,9 +1933,9 @@ function openLightbox(batchItems, startIndex) {
                         hdrLabel.style.left  = '';
                         hdrLabel.style.top   = '';
                         const rect = imgEl.getBoundingClientRect();
-                        const wrapRect = imageWrapper.getBoundingClientRect();
-                        slider.style.left   = (rect.left - wrapRect.left) + 'px';
-                        slider.style.top    = (rect.top  - wrapRect.top)  + 'px';
+                        const containerRect = imgContainer.getBoundingClientRect();
+                        slider.style.left   = (rect.left - containerRect.left) + 'px';
+                        slider.style.top    = (rect.top  - containerRect.top)  + 'px';
                         slider.style.width  = rect.width  + 'px';
                         slider.style.height = rect.height + 'px';
                     }
@@ -1745,11 +2005,10 @@ function openLightbox(batchItems, startIndex) {
                     scrollZoomCurrent = 1;
                     snapGateActive = false;
                     if (scrollZoomRaf) { cancelAnimationFrame(scrollZoomRaf); scrollZoomRaf = null; }
-                    if (panRaf) { cancelAnimationFrame(panRaf); panRaf = null; }
-                    panLastX = -1; panLastY = -1; panX = 0; panY = 0;
+                    zoomTx = 0; zoomTy = 0;
                     imgEl.style.transition = '';
-                    imgEl.style.transform = 'scale(1)';
-                    imgEl.style.transformOrigin = '50% 50%';
+                    imgEl.style.transformOrigin = '0 0';
+                    imgEl.style.transform = 'translate(0px, 0px) scale(1)';
                     zoomTooltip.innerHTML = `<svg class="zoom-icon" xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>1.0× zoom`;
                 }
 
@@ -1777,7 +2036,7 @@ function openLightbox(batchItems, startIndex) {
                 existingSlider.remove();
                 lightboxSdrActive = false;
                 compareBtn.classList.remove('button-active');
-                compareBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 6H3"/><path d="m7 12-4-4 4-4"/><path d="M3 18h18"/><path d="m17 12 4 4-4 4"/></svg> <u>S</u>DR Slider';
+                compareBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 6H3"/><path d="m7 12-4-4 4-4"/><path d="M3 18h18"/><path d="m17 12 4 4-4 4"/></svg><span class="btn-label"> <u>S</u>DR Slider</span>';
             }
 
             if (lightboxSdrToggleActive) {
@@ -1835,8 +2094,35 @@ function openLightbox(batchItems, startIndex) {
         renderLightboxImage();
     });
 
+    // ── Sync toolbar width to actual rendered image width ──
+    // ResizeObserver tracks the real paint rect of imgEl so the button groups
+    // always align with the image edges regardless of aspect ratio or viewport size.
+    // After setting the width, it checks whether the buttons still fit — if either
+    // side is overflowing it adds `toolbar-compact` to hide labels automatically.
+    function _updateToolbarWidth(w) {
+        toolbarInner.style.width    = w + 'px';
+        toolbarInner.style.maxWidth = 'none';
+        // Temporarily remove compact class so labels render at full width for measurement
+        toolbarInner.classList.remove('toolbar-compact');
+        // Measure the actual last button on the left and first button on the right,
+        // not the flex containers (which always span half the toolbar each).
+        const leftBtns  = toolbarLeft.querySelectorAll('button');
+        const rightBtns = toolbarRight.querySelectorAll('button');
+        const lastLeft  = leftBtns[leftBtns.length - 1];
+        const firstRight = rightBtns[0];
+        if (!lastLeft || !firstRight) return;
+        const collides = lastLeft.getBoundingClientRect().right >= firstRight.getBoundingClientRect().left - 12;
+        toolbarInner.classList.toggle('toolbar-compact', collides);
+    }
+    const _toolbarRO = new ResizeObserver(entries => {
+        const w = entries[0]?.contentRect.width;
+        if (w && w > 0) _updateToolbarWidth(w);
+    });
+    _toolbarRO.observe(imgEl);
+
     // Store cleanup ref on overlay for closeLightbox
     overlay._cleanupMouseUp = _mouseUpLightbox;
+    overlay._cleanupRO = _toolbarRO;
 }
 
 let _lightboxRender = null; // set by openLightbox, called by navigateLightbox
@@ -1852,6 +2138,7 @@ function closeLightbox() {
     const overlay = document.getElementById('lightbox-overlay');
     if (overlay) {
         if (overlay._cleanupMouseUp) document.removeEventListener('mouseup', overlay._cleanupMouseUp);
+        if (overlay._cleanupRO) overlay._cleanupRO.disconnect();
         overlay.classList.add('lightbox-closing');
         overlay.style.opacity = '0';
         const duration = parseFloat(getComputedStyle(overlay).transitionDuration) * 1000;
@@ -1860,11 +2147,14 @@ function closeLightbox() {
     document.body.style.overflow = '';
     document.documentElement.style.overflow = '';
     lightboxOpen = false;
+    // Remove the ?img= param so the URL goes back to the gallery
+    history.replaceState(null, '', location.pathname);
     lightboxBatch = [];
     lightboxIndex = 0;
     lightboxPixelBuffer = null;
     lightboxSdrToggleActive = false;
     _lightboxRender = null;
+    _lightboxResetZoomIdleTimer = null;
     globalDetailsEnabled = false;
     nitTooltip.style.display = 'none';
     zoomTooltip.style.display = 'none';
@@ -2320,7 +2610,7 @@ function imoGamutRow(label, pct, color) {
 
 // ─── Import Modal ─────────────────────────────────────────────────────────────
 
-function showImportModal(fileCount) {
+function showImportModal(fileCount, files = []) {
     return new Promise((resolve) => {
         const overlay = document.createElement('div');
         overlay.className = 'modal-overlay';
@@ -2328,12 +2618,18 @@ function showImportModal(fileCount) {
         const modal = document.createElement('div');
         modal.className = 'modal';
 
+        const fileListItems = files.map(f => `<li class="modal-file-list-item">
+            <svg class="modal-file-icon" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+            <span class="modal-file-name">${f.name}</span>
+        </li>`).join('');
+
         modal.innerHTML = `
             <div class="modal-header">
                 <span class="modal-title">${fileCount} image${fileCount === 1 ? '' : 's'} ready to import</span>
                 <span class="modal-subtitle">Set game name and HDR type for this batch</span>
             </div>
             <div class="modal-body">
+                ${fileListItems ? `<ul class="modal-file-list">${fileListItems}</ul>` : ''}
                 <div class="modal-section-label">Game Name</div>
                 <div class="game-search-wrap">
                     <div class="game-search-row">
@@ -2343,7 +2639,23 @@ function showImportModal(fileCount) {
                     <div class="game-search-results"></div>
                 </div>
                 <div class="modal-section-label modal-section-label-hdr">HDR Type</div>
-                <div class="hdr-type-grid" id="importHdrGrid"></div>
+                <div class="hdr-custom-select-wrap" id="importHdrWrap">
+                    <div class="game-search-row modal-select-row hdr-custom-trigger">
+                        <svg class="game-search-icon" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+                        <span class="hdr-custom-label">Unspecified</span>
+                        <svg class="hdr-custom-chevron" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#888" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                    </div>
+                    <div class="hdr-custom-dropdown"></div>
+                </div>
+                <div class="modal-section-label modal-section-label-info">Additional Info</div>
+                <div class="game-search-row">
+                    <svg class="game-search-icon" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>
+                    <input type="text" class="modal-additional-info-input" autocomplete="off" />
+                </div>
+                <label class="modal-spoiler-label">
+                    <input type="checkbox" class="modal-spoiler-checkbox" />
+                    Mark as spoiler
+                </label>
             </div>
             <div class="modal-footer">
                 <button class="button-secondary modal-cancel">Cancel</button>
@@ -2354,7 +2666,6 @@ function showImportModal(fileCount) {
         overlay.appendChild(modal);
         document.body.appendChild(overlay);
 
-        const grid        = modal.querySelector('#importHdrGrid');
         const searchInput = modal.querySelector('.game-search-input');
         const resultsEl   = modal.querySelector('.game-search-results');
         const importBtn   = modal.querySelector('.modal-import');
@@ -2447,41 +2758,59 @@ function showImportModal(fileCount) {
             setTimeout(() => { resultsEl.innerHTML = ''; resultsEl.style.display = 'none'; }, 150);
         });
 
-        // Build grouped chips
-        const groups = [...new Set(HDR_TYPES.map(t => t.group))];
-        groups.forEach(groupName => {
-            const groupEl = document.createElement('div');
-            groupEl.className = 'hdr-type-group';
+        // Build custom HDR type dropdown
+        const _importHdrTrigger  = modal.querySelector('#importHdrWrap .hdr-custom-trigger');
+        const _importHdrDropdown = modal.querySelector('#importHdrWrap .hdr-custom-dropdown');
+        const _importHdrLabel    = modal.querySelector('#importHdrWrap .hdr-custom-label');
 
-            const groupLabel = document.createElement('div');
-            groupLabel.className = 'hdr-type-group-label';
-            groupLabel.textContent = groupName;
-            groupEl.appendChild(groupLabel);
+        function _importSetHdr(val) {
+            selected = val || null;
+            const def = HDR_TYPES.find(t => t.id === val);
+            _importHdrLabel.textContent = def ? def.label : 'Unspecified';
+            _importHdrDropdown.querySelectorAll('.hdr-custom-item').forEach(el =>
+                el.classList.toggle('hdr-custom-item-active', el.dataset.value === (val || '')));
+        }
+        function _importCloseHdr() {
+            _importHdrDropdown.style.display = 'none';
+            _importHdrTrigger.classList.remove('hdr-trigger-open');
+        }
 
-            const row = document.createElement('div');
-            row.className = 'hdr-type-row';
+        // None item
+        const _importNoneItem = document.createElement('div');
+        _importNoneItem.className = 'hdr-custom-item';
+        _importNoneItem.dataset.value = '';
+        _importNoneItem.textContent = 'Unspecified';
+        _importNoneItem.addEventListener('mousedown', e => { e.preventDefault(); _importSetHdr(''); _importCloseHdr(); });
+        _importHdrDropdown.appendChild(_importNoneItem);
 
+        [...new Set(HDR_TYPES.map(t => t.group))].forEach(groupName => {
+            const gh = document.createElement('div');
+            gh.className = 'hdr-custom-group-header';
+            gh.textContent = '▸ ' + groupName;
+            _importHdrDropdown.appendChild(gh);
             HDR_TYPES.filter(t => t.group === groupName).forEach(type => {
-                const chip = document.createElement('button');
-                chip.className = 'hdr-type-chip';
-                chip.textContent = type.label;
-                chip.dataset.id = type.id;
-                chip.onclick = () => {
-                    const isSelected = chip.classList.contains('selected');
-                    grid.querySelectorAll('.hdr-type-chip').forEach(c => c.classList.remove('selected'));
-                    if (!isSelected) {
-                        chip.classList.add('selected');
-                        selected = type.id;
-                    } else {
-                        selected = null;
-                    }
-                };
-                row.appendChild(chip);
+                const item = document.createElement('div');
+                item.className = 'hdr-custom-item hdr-custom-item-indented';
+                item.dataset.value = type.id;
+                item.textContent = type.label;
+                item.addEventListener('mousedown', e => { e.preventDefault(); _importSetHdr(type.id); _importCloseHdr(); });
+                _importHdrDropdown.appendChild(item);
             });
-
-            groupEl.appendChild(row);
-            grid.appendChild(groupEl);
         });
+
+        _importHdrTrigger.addEventListener('mousedown', e => {
+            e.preventDefault();
+            const isOpen = _importHdrDropdown.style.display === 'flex';
+            if (isOpen) { _importCloseHdr(); } else {
+                _importHdrDropdown.style.display = 'flex';
+                _importHdrTrigger.classList.add('hdr-trigger-open');
+            }
+        });
+        modal.addEventListener('mousedown', e => {
+            if (_importHdrDropdown.style.display === 'flex' && !e.target.closest('#importHdrWrap')) _importCloseHdr();
+        });
+
+        _importSetHdr(selected ?? '');
 
         modal.querySelector('.modal-cancel').onclick = () => {
             overlay.remove();
@@ -2490,9 +2819,11 @@ function showImportModal(fileCount) {
         };
 
         importBtn.onclick = () => {
+            const spoiler = modal.querySelector('.modal-spoiler-checkbox').checked;
+            const additionalInfo = modal.querySelector('.modal-additional-info-input').value.trim() || null;
             overlay.remove();
             document.removeEventListener('keydown', onImportKeydown, true);
-            resolve({ hdrType: selected ?? 'unknown', gameName: selectedGameName });
+            resolve({ hdrType: selected ?? 'unknown', gameName: selectedGameName, spoiler, additionalInfo });
         };
 
         let importMousedownOnModal = false;
@@ -2534,7 +2865,7 @@ async function searchRawg(query) {
     return data.results || [];
 }
 
-function showEditModal(currentHdrType, currentGameName) {
+function showEditModal(currentHdrType, currentGameName, currentSpoiler, thumbUrl, currentAdditionalInfo) {
     return new Promise((resolve) => {
         const overlay = document.createElement('div');
         overlay.className = 'modal-overlay';
@@ -2546,6 +2877,7 @@ function showEditModal(currentHdrType, currentGameName) {
             <div class="modal-header">
                 <span class="modal-title">Edit Details</span>
                 <span class="modal-subtitle">Set game name and HDR type for this batch</span>
+                ${thumbUrl ? `<img class="modal-thumb" src="${thumbUrl}" alt="Preview" />` : ''}
             </div>
             <div class="modal-body">
                 <div class="modal-section-label">Game Name</div>
@@ -2557,7 +2889,23 @@ function showEditModal(currentHdrType, currentGameName) {
                     <div class="game-search-results"></div>
                 </div>
                 <div class="modal-section-label modal-section-label-hdr">HDR Type</div>
-                <div class="hdr-type-grid" id="editHdrGrid"></div>
+                <div class="hdr-custom-select-wrap" id="editHdrWrap">
+                    <div class="game-search-row modal-select-row hdr-custom-trigger">
+                        <svg class="game-search-icon" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+                        <span class="hdr-custom-label">Unspecified</span>
+                        <svg class="hdr-custom-chevron" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#888" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                    </div>
+                    <div class="hdr-custom-dropdown"></div>
+                </div>
+                <div class="modal-section-label modal-section-label-info">Additional Info</div>
+                <div class="game-search-row">
+                    <svg class="game-search-icon" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>
+                    <input type="text" class="modal-additional-info-input" autocomplete="off" value="${currentAdditionalInfo || ''}"/>
+                </div>
+                <label class="modal-spoiler-label">
+                    <input type="checkbox" class="modal-spoiler-checkbox" ${currentSpoiler ? 'checked' : ''} />
+                    Mark as spoiler
+                </label>
             </div>
             <div class="modal-footer">
                 <button class="button-secondary modal-cancel">Cancel</button>
@@ -2568,7 +2916,6 @@ function showEditModal(currentHdrType, currentGameName) {
         overlay.appendChild(modal);
         document.body.appendChild(overlay);
 
-        const grid        = modal.querySelector('#editHdrGrid');
         const searchInput = modal.querySelector('.game-search-input');
         const resultsEl   = modal.querySelector('.game-search-results');
         const saveBtn     = modal.querySelector('.modal-import');
@@ -2673,42 +3020,59 @@ function showEditModal(currentHdrType, currentGameName) {
         };
         document.addEventListener('keydown', onModalKeydown, true);
 
-        // ── HDR type chips ──
-        const groups = [...new Set(HDR_TYPES.map(t => t.group))];
-        groups.forEach(groupName => {
-            const groupEl = document.createElement('div');
-            groupEl.className = 'hdr-type-group';
+        // ── Build custom HDR type dropdown ──
+        const _editHdrTrigger  = modal.querySelector('#editHdrWrap .hdr-custom-trigger');
+        const _editHdrDropdown = modal.querySelector('#editHdrWrap .hdr-custom-dropdown');
+        const _editHdrLabel    = modal.querySelector('#editHdrWrap .hdr-custom-label');
 
-            const groupLabel = document.createElement('div');
-            groupLabel.className = 'hdr-type-group-label';
-            groupLabel.textContent = groupName;
-            groupEl.appendChild(groupLabel);
+        function _editSetHdr(val) {
+            selectedHdrType = val || 'unknown';
+            const def = HDR_TYPES.find(t => t.id === val);
+            _editHdrLabel.textContent = def ? def.label : 'Unspecified';
+            _editHdrDropdown.querySelectorAll('.hdr-custom-item').forEach(el =>
+                el.classList.toggle('hdr-custom-item-active', el.dataset.value === (val || '')));
+        }
+        function _editCloseHdr() {
+            _editHdrDropdown.style.display = 'none';
+            _editHdrTrigger.classList.remove('hdr-trigger-open');
+        }
 
-            const row = document.createElement('div');
-            row.className = 'hdr-type-row';
+        // None item
+        const _editNoneItem = document.createElement('div');
+        _editNoneItem.className = 'hdr-custom-item';
+        _editNoneItem.dataset.value = '';
+        _editNoneItem.textContent = 'Unspecified';
+        _editNoneItem.addEventListener('mousedown', e => { e.preventDefault(); _editSetHdr(''); _editCloseHdr(); });
+        _editHdrDropdown.appendChild(_editNoneItem);
 
+        [...new Set(HDR_TYPES.map(t => t.group))].forEach(groupName => {
+            const gh = document.createElement('div');
+            gh.className = 'hdr-custom-group-header';
+            gh.textContent = '▸ ' + groupName;
+            _editHdrDropdown.appendChild(gh);
             HDR_TYPES.filter(t => t.group === groupName).forEach(type => {
-                const chip = document.createElement('button');
-                chip.className = 'hdr-type-chip';
-                chip.textContent = type.label;
-                chip.dataset.id = type.id;
-                if (type.id === currentHdrType) chip.classList.add('selected');
-                chip.onclick = () => {
-                    const isSelected = chip.classList.contains('selected');
-                    grid.querySelectorAll('.hdr-type-chip').forEach(c => c.classList.remove('selected'));
-                    if (!isSelected) {
-                        chip.classList.add('selected');
-                        selectedHdrType = type.id;
-                    } else {
-                        selectedHdrType = 'unknown';
-                    }
-                };
-                row.appendChild(chip);
+                const item = document.createElement('div');
+                item.className = 'hdr-custom-item hdr-custom-item-indented';
+                item.dataset.value = type.id;
+                item.textContent = type.label;
+                item.addEventListener('mousedown', e => { e.preventDefault(); _editSetHdr(type.id); _editCloseHdr(); });
+                _editHdrDropdown.appendChild(item);
             });
-
-            groupEl.appendChild(row);
-            grid.appendChild(groupEl);
         });
+
+        _editHdrTrigger.addEventListener('mousedown', e => {
+            e.preventDefault();
+            const isOpen = _editHdrDropdown.style.display === 'flex';
+            if (isOpen) { _editCloseHdr(); } else {
+                _editHdrDropdown.style.display = 'flex';
+                _editHdrTrigger.classList.add('hdr-trigger-open');
+            }
+        });
+        modal.addEventListener('mousedown', e => {
+            if (_editHdrDropdown.style.display === 'flex' && !e.target.closest('#editHdrWrap')) _editCloseHdr();
+        });
+
+        _editSetHdr(currentHdrType ?? '');
 
         modal.querySelector('.modal-cancel').onclick = () => {
             overlay.remove();
@@ -2717,9 +3081,11 @@ function showEditModal(currentHdrType, currentGameName) {
         };
 
         saveBtn.onclick = () => {
+            const spoiler = modal.querySelector('.modal-spoiler-checkbox').checked;
+            const additionalInfo = modal.querySelector('.modal-additional-info-input').value.trim() || null;
             overlay.remove();
             document.removeEventListener('keydown', onModalKeydown, true);
-            resolve({ hdrType: selectedHdrType ?? 'unknown', gameName: selectedGameName });
+            resolve({ hdrType: selectedHdrType ?? 'unknown', gameName: selectedGameName, spoiler, additionalInfo });
         };
 
         let editMousedownOnModal = false;
@@ -2752,6 +3118,12 @@ function buildFilterBar(allItems) {
     const gameNames = [...new Set(
         allItems.map(item => item.gameName).filter(Boolean)
     )].sort((a, b) => a.localeCompare(b));
+
+    // Count images per game
+    const gameCountMap = {};
+    allItems.forEach(item => {
+        if (item.gameName) gameCountMap[item.gameName] = (gameCountMap[item.gameName] || 0) + 1;
+    });
 
     bar.innerHTML = `
         <div class="gallery-search-wrap">
@@ -2795,7 +3167,7 @@ function buildFilterBar(allItems) {
 
             const header = document.createElement('div');
             header.className = 'gallery-search-dropdown-header';
-            header.textContent = 'Most images';
+            header.textContent = '-Top Images-';
             dropdown.appendChild(header);
 
             top5.forEach(([name, count]) => {
@@ -2805,7 +3177,7 @@ function buildFilterBar(allItems) {
                 nameSpan.textContent = name;
                 const countSpan = document.createElement('span');
                 countSpan.className = 'gallery-search-suggestion-count';
-                countSpan.textContent = `${count} img${count === 1 ? '' : 's'}`;
+                countSpan.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>${count}`;
                 item.appendChild(nameSpan);
                 item.appendChild(countSpan);
                 item.addEventListener('mousedown', (e) => {
@@ -2831,9 +3203,11 @@ function buildFilterBar(allItems) {
             item.className = 'gallery-search-suggestion';
             // Highlight matching part
             const idx = name.toLowerCase().indexOf(q);
-            item.innerHTML = name.slice(0, idx)
-                + `<mark>${name.slice(idx, idx + q.length)}</mark>`
-                + name.slice(idx + q.length);
+            const countSpan = document.createElement('span');
+            countSpan.className = 'gallery-search-suggestion-count';
+            countSpan.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>${gameCountMap[name] || 0}`;
+            item.innerHTML = `<span>${name.slice(0, idx)}<mark>${name.slice(idx, idx + q.length)}</mark>${name.slice(idx + q.length)}</span>`;
+            item.appendChild(countSpan);
             item.addEventListener('mousedown', (e) => {
                 e.preventDefault(); // prevent input blur before click fires
                 gameSearchQuery = name;
@@ -2931,8 +3305,24 @@ fileInput.addEventListener('change', async () => {
 });
 
 // Initialize gallery on page load
-document.addEventListener('DOMContentLoaded', () => {
-    refreshGallery();
+document.addEventListener('DOMContentLoaded', async () => {
+    await refreshGallery();
+
+    // Deep-link: if the URL contains ?img=<firestoreId>, open that image's lightbox
+    const _imgParam = new URLSearchParams(location.search).get('img');
+    if (_imgParam && _allGalleryItems.length) {
+        const _targetItem = _allGalleryItems.find(it => it.id === _imgParam);
+        if (_targetItem) {
+            // Find the batch this item belongs to
+            const _batchKey = _targetItem.batchId || `solo_${_targetItem.id}`;
+            const _batchItems = _allGalleryItems.filter(it =>
+                (it.batchId && it.batchId === _targetItem.batchId) ||
+                (!it.batchId && it.id === _targetItem.id)
+            );
+            const _startIdx = _batchItems.findIndex(it => it.id === _targetItem.id);
+            openLightbox(_batchItems, Math.max(0, _startIdx));
+        }
+    }
 });
 
 // Clean up URLs when page unloads

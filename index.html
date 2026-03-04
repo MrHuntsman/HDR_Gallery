@@ -3,8 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>HDR Gallery</title>
+    <title>HDR Screenshots Gallery</title>
     <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&icon_names=add_photo_alternate,compress" />
     <link rel="icon" href="data:,">
 </head>
 <body>
@@ -22,18 +23,21 @@
     </div>
 
     <div class="container">
-        <h1>HDR Gallery</h1>
+        <h1>HDR Screenshots Gallery</h1>
         <div class="upload-section">
             <div class="drop-zone" id="dropZone">
-                <p class="drop-zone-text">Drop Images or Click Here</p>
-                <p class="drop-zone-formats">.png .avif .jxr .exr .hdr</p>
+                <div style="display:flex;flex-direction:column;align-items:center;gap:6px;">
+                    <span class="material-symbols-outlined drop-zone-icon">add_photo_alternate</span>
+                    <p class="drop-zone-text" style="margin:0;">Drop Images or Click Here</p>
+                    <p class="drop-zone-formats" style="margin:0;">.png .avif .jxr .exr .hdr</p>
+                </div>
             </div>
             <input id="fileInput" type="file" multiple accept=".png,.avif,.jxr,.exr,.hdr" aria-label="Select HDR image files" style="display:none;" />
         </div>
         <div id="filterBar" class="filter-bar"></div>
         <div id="statusMessage" class="status-message"></div>
         <div class="gallery-section-header">
-            <span class="gallery-section-title">Latest uploads</span>
+          <!--  <span class="gallery-section-title">Latest uploads</span> -->
         </div>
         <div id="gallery" class="gallery"></div>
     </div>

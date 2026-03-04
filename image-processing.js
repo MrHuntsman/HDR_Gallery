@@ -975,7 +975,7 @@ async function _getAvifDecoder() {
 async function _encodeToAVIF(u16pq, width, height) {
     const encode = await _getAvifEncoder();
     const avifBuf = await encode({ data: u16pq, width, height }, {
-        bitDepth: 12, quality: 80, yuvFormat: 'YUV444', matrixCoefficients: 9, speed: 8,
+        bitDepth: 12, quality: 90, yuvFormat: 'YUV444', matrixCoefficients: 9, speed: 10,
     });
     const data = new Uint8Array(avifBuf);
     const view = new DataView(avifBuf);
