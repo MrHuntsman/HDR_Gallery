@@ -1,73 +1,36 @@
-// ─── ImageMagick WASM ────────────────────────────────────────────────────────
-// Lazy-loaded on first use. Requires imagemagick.umd.js and magick.wasm.
-// Download from:
-//   https://cdn.jsdelivr.net/gh/Armster15/imagemagick-wasm-builds@master/lib/imagemagick.umd.js
-//   https://cdn.jsdelivr.net/npm/@imagemagick/magick-wasm@0.0.36/dist/magick.wasm
-let magickReady = false;
-let magickLoading = null;
-let _ImageMagick = null;
-let _MagickFormat = null;
+// ─── Quality / Encoding Config ───────────────────────────────────────────────
+const IMAGE_CONFIG = {
+    // HDR thumbnail (12-bit BT.2020 PQ AVIF, downscaled to ≤thumbMaxPx)
+    // Thumbnails are always lossy — lossless at thumb resolution gives no
+    // perceptible benefit but can be several times larger.
+    thumbMaxPx:       1280,
+    thumbAvifQuality: 85,
+    thumbAvifSpeed:   10,
+    // No tiling for thumbnails — too small to benefit
 
-// Cache key — bump this string whenever magick.wasm is updated so stale bytes
-// are evicted and the new version is fetched and re-cached automatically.
-const _MAGICK_WASM_URL     = './image-processing/magick.wasm';
-const _MAGICK_CACHE_NAME   = 'magick-wasm-v1';
+    // HDR full-resolution AVIF (12-bit BT.2020 PQ)
+    // Set hdrLossless: true for bit-exact round-trips (e.g. archival uploads).
+    // When true, quality/tune are ignored and the encoder uses AV1 lossless mode.
+    // Expect 3-6x larger files compared to quality 95.
+    hdrLossless:      false,
+    hdrAvifQuality:   95,
+    hdrAvifSpeed:     10,
+    hdrTileRowsLog2:  1,   // 2x2 tiling for parallel encode on large images
+    hdrTileColsLog2:  1,
+    hdrTune:          2,   // 2 = SSIM (perceptually optimised); ignored when hdrLossless
 
-// Retrieves magick.wasm from the Cache Storage API, fetching and caching it on
-// first use. Subsequent page loads (and refreshes) are served entirely from the
-// cache — no network round-trip, no repeated multi-MB download.
-async function _getMagickWasmUrl() {
-    let cache;
-    try { cache = await caches.open(_MAGICK_CACHE_NAME); } catch (_) { return _MAGICK_WASM_URL; }
+    // SDR AVIF (8-bit sRGB)
+    // Set sdrLossless: true to preserve the exact dithered pixel values.
+    // Rarely needed -- the SDR is a tone-mapped derivative, not a source master.
+    sdrLossless:      false,
+    sdrAvifQuality:   100,
+    sdrAvifSpeed:     10,
+    sdrTileRowsLog2:  1,
+    sdrTileColsLog2:  1,
+    sdrTune:          2,   // ignored when sdrLossless
+};
 
-    let response = await cache.match(_MAGICK_WASM_URL);
-    if (!response) {
-        console.log('[getMagick] magick.wasm not in cache — fetching and caching…');
-        try {
-            const fresh = await fetch(_MAGICK_WASM_URL);
-            if (!fresh.ok) throw new Error(`fetch ${fresh.status}`);
-            await cache.put(_MAGICK_WASM_URL, fresh.clone());
-            response = fresh;
-        } catch (err) {
-            console.warn('[getMagick] cache store failed, falling back to direct URL:', err);
-            return _MAGICK_WASM_URL;
-        }
-    } else {
-        console.log('[getMagick] magick.wasm served from Cache Storage');
-    }
-
-    // Convert cached response to a blob URL so ImageMagick can load it without
-    // triggering another network request.
-    const blob = await response.blob();
-    return URL.createObjectURL(blob);
-}
-
-async function getMagick() {
-    if (magickReady) return { ImageMagick: _ImageMagick, MagickFormat: _MagickFormat };
-    if (magickLoading) return magickLoading;
-
-    magickLoading = (async () => {
-        await new Promise((resolve, reject) => {
-            const script = document.createElement('script');
-            script.src = './image-processing/imagemagick.umd.js';
-            script.onload = resolve;
-            script.onerror = () => reject(new Error('Failed to load imagemagick.umd.js — make sure it is in the same folder as index.html'));
-            document.head.appendChild(script);
-        });
-
-        const wasmUrl = await _getMagickWasmUrl();
-        await window.ImageMagick.initializeImageMagick(wasmUrl);
-
-        _ImageMagick = window.ImageMagick.ImageMagick;
-        _MagickFormat = window.ImageMagick.MagickFormat;
-        magickReady = true;
-        return { ImageMagick: _ImageMagick, MagickFormat: _MagickFormat };
-    })();
-
-    return magickLoading;
-}
-
-// ─── SKIV Color Math ─────────────────────────────────────────────────────────
+// ─── jpegxr.js WASM Codec ────────────────────────────────────────────────────
 // Ported from SKIV image.h / image.cpp. Used by the PNG SDR tonemap path
 // (convertToSDR) and the JXR HDR/SDR encode path (convertJxrToPNG).
 //
@@ -200,6 +163,29 @@ function _srgbLut(v) {
     return t === 0 ? _SRGB_LUT[lo] : _SRGB_LUT[lo] + t * (_SRGB_LUT[lo + 1] - _SRGB_LUT[lo]);
 }
 
+// ─── 4×4 Bayer ordered dither ─────────────────────────────────────────────────
+// Values are pre-scaled to ±0.47 LSB on a 0–255 scale.
+// Three phase-shifted tables (R/G/B) ensure channels don't quantise in lockstep,
+// preventing colour-tinted banding in neutral gradients and dark scenes.
+// Usage: Math.round(_srgbLut(r) * 255 + _BAYER_R[(y & 3) * 4 + (x & 3)])
+const _BAYER_RAW_IP = new Float32Array([
+     0, 8, 2,10,
+    12, 4,14, 6,
+     3,11, 1, 9,
+    15, 7,13, 5,
+]);
+const _BAYER_IP_R = new Float32Array(16);
+const _BAYER_IP_G = new Float32Array(16);
+const _BAYER_IP_B = new Float32Array(16);
+for (let _row = 0; _row < 4; _row++) {
+    for (let _col = 0; _col < 4; _col++) {
+        const _v = (_BAYER_RAW_IP[_row * 4 + _col] - 7.5) / 16.0;
+        _BAYER_IP_R[_row * 4 + _col]              = _v;
+        _BAYER_IP_G[_row * 4 + ((_col + 1) & 3)]   = _v;
+        _BAYER_IP_B[_row * 4 + ((_col + 2) & 3)]   = _v;
+    }
+}
+
 // Pre-composed matrices — eliminates intermediate XYZ step in the ICtCp round-trip.
 //   _M_709_TO_LMS = _M_XYZ_TO_LMS · _M_709_TO_XYZ  (BT.709 → LMS in one multiply)
 //   _M_LMS_TO_709 = _M_XYZ_TO_709 · _M_LMS_TO_XYZ  (LMS → BT.709 in one multiply)
@@ -249,45 +235,6 @@ function tonemapICtCp_global(r, g, b, maxYInPQ) {
 
     const [ro, go, bo] = ictcpToRec709_global(I1, Ct * I_scale, Cp * I_scale);
     return [Math.max(ro, 0), Math.max(go, 0), Math.max(bo, 0)];
-}
-
-
-// ─── ImageMagick JXR Support Probe ───────────────────────────────────────────
-// Returns { supported: bool, method: string, error?: string }.
-// JXR support requires a custom ImageMagick WASM build with the WMP/JXR codec
-// compiled in — the standard CDN build does not include it.
-async function checkJxrSupport() {
-    try {
-        const { ImageMagick } = await getMagick();
-
-        // Method 1: query the format list directly if the API exposes it
-        const formats = ImageMagick.supportedFormats ?? ImageMagick.coderInfoList ?? null;
-        if (formats) {
-            const hasJxr = [...formats].some(f => {
-                const name = (f.format ?? f.name ?? '').toString().toUpperCase();
-                return name === 'JXR' || name === 'WDP' || name === 'HDP';
-            });
-            return { supported: hasJxr, method: 'formatList' };
-        }
-
-        // Method 2: try decoding a minimal valid JXR stub (magic bytes: 0x49 0x49 0xBC)
-        const stub = new Uint8Array([0x49, 0x49, 0xBC, 0x01, ...new Array(60).fill(0)]);
-        let errMsg = '';
-        try {
-            await new Promise((resolve, reject) => {
-                ImageMagick.read(stub, (img) => resolve(img));
-                setTimeout(() => reject(new Error('timeout')), 2000);
-            });
-        } catch (e) {
-            errMsg = e.message ?? '';
-        }
-
-        const noDelegate = /delegate|no support|unable to open|unable to read/i.test(errMsg);
-        return { supported: !noDelegate && errMsg === '', method: 'probeConvert', error: errMsg || null };
-
-    } catch (e) {
-        return { supported: false, method: 'error', error: e.message };
-    }
 }
 
 
@@ -436,10 +383,12 @@ async function convertJxrToPNG(file) {
 
             // SDR PNG: tonemap in BT.709 linear space, then apply sRGB gamma via LUT.
             // Stays in BT.709 throughout — no primary conversion needed.
+            // Bayer ordered dithering prevents 8-bit quantisation banding in dark scenes.
             const [rt, gt, bt] = tonemapICtCp_global(r, g, b, maxYInPQ);
-            sdrBuf[si]     = Math.round(_srgbLut(rt) * 255);
-            sdrBuf[si + 1] = Math.round(_srgbLut(gt) * 255);
-            sdrBuf[si + 2] = Math.round(_srgbLut(bt) * 255);
+            const _bx = i % width, _by = (i / width) | 0, _bi = (_by & 3) * 4 + (_bx & 3);
+            sdrBuf[si]     = Math.min(255, Math.max(0, Math.round(_srgbLut(rt) * 255 + _BAYER_IP_R[_bi])));
+            sdrBuf[si + 1] = Math.min(255, Math.max(0, Math.round(_srgbLut(gt) * 255 + _BAYER_IP_G[_bi])));
+            sdrBuf[si + 2] = Math.min(255, Math.max(0, Math.round(_srgbLut(bt) * 255 + _BAYER_IP_B[_bi])));
             sdrBuf[si + 3] = 255;
 
             // Gamut classification on original BT.709 linear values
@@ -466,14 +415,13 @@ async function convertJxrToPNG(file) {
             };
         }
 
-        // ── SDR PNG ───────────────────────────────────────────────────────────
+        // ── SDR (AVIF > WebP > PNG) ───────────────────────────────────────────
         // Written directly from the tone-mapped sRGB buffer — no canvas involved,
         // so pixel values are written verbatim without browser colour management.
-        const sdrPng = await buildPNG8(sdrBuf, width, height);
-        const sdrFile = new File([sdrPng], outputName.replace('.png', '_SDR.png'), { type: 'image/png' });
+        const sdrFile = await _encodeSdrBlob(sdrBuf, width, height, outputName.replace(/\.[^.]+$/, ''));
 
-        // ── HDR thumbnail (downscaled to ≤1280px, still 16-bit PQ with cICP) ──
-        const thumbBlob = await buildHdrThumb(hdrBuf, width, height, cicp, 1280);
+        // ── HDR thumbnail (downscaled to ≤1280px, 12-bit PQ AVIF with cICP) ──
+        const thumbBlob = await buildHdrThumb(hdrBuf, width, height, cicp, IMAGE_CONFIG.thumbMaxPx);
 
         return { hdrFile, sdrBlob: sdrFile, thumbBlob };
     }
@@ -524,6 +472,37 @@ async function buildPNG8(rgba8, width, height) {
     out.set(sig, pos); pos += sig.length;
     for (const c of chunks) { out.set(c, pos); pos += c.length; }
     return out;
+}
+
+// Encodes an 8-bit RGBA pixel buffer to the best available format (AVIF > WebP > PNG).
+// baseName should be the output filename WITHOUT extension and WITHOUT '_SDR' suffix.
+// Returns a File named `${baseName}_SDR.avif` (or .webp / .png on fallback).
+async function _encodeSdrBlob(sdrBuf, width, height, baseName) {
+    // Prefer the same jsquash AVIF WASM encoder used for HDR thumbnails —
+    // canvas.toBlob('image/avif') is not yet supported in all browsers.
+    try {
+        const encode = await _getAvifEncoder();
+        const _sdrLossless = IMAGE_CONFIG.sdrLossless === true;
+        const avifBuf = await encode(
+            { data: new Uint8ClampedArray(sdrBuf.buffer ?? sdrBuf), width, height },
+            _sdrLossless
+                ? { bitDepth: 8, lossless: true, yuvFormat: 'YUV444', matrixCoefficients: 0, speed: IMAGE_CONFIG.sdrAvifSpeed, tileRowsLog2: IMAGE_CONFIG.sdrTileRowsLog2, tileColsLog2: IMAGE_CONFIG.sdrTileColsLog2 }
+                : { bitDepth: 8, quality: IMAGE_CONFIG.sdrAvifQuality, yuvFormat: 'YUV444', matrixCoefficients: 0, speed: IMAGE_CONFIG.sdrAvifSpeed, tileRowsLog2: IMAGE_CONFIG.sdrTileRowsLog2, tileColsLog2: IMAGE_CONFIG.sdrTileColsLog2, tune: IMAGE_CONFIG.sdrTune }
+        );
+        return new File([avifBuf], `${baseName}_SDR.avif`, { type: 'image/avif' });
+    } catch (err) {
+        console.warn('[_encodeSdrBlob] AVIF encode failed, falling back to WebP/PNG:', err.message);
+    }
+    // WebP fallback via canvas.toBlob.
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    canvas.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(sdrBuf.buffer ?? sdrBuf), width, height), 0, 0);
+    const webp = await new Promise(res => canvas.toBlob(res, 'image/webp', 0.90));
+    if (webp && webp.type === 'image/webp') return new File([webp], `${baseName}_SDR.webp`, { type: 'image/webp' });
+    // Lossless PNG last resort.
+    const pngData = await buildPNG8(new Uint8ClampedArray(sdrBuf.buffer ?? sdrBuf), width, height);
+    return new File([pngData], `${baseName}_SDR.png`, { type: 'image/png' });
 }
 
 // Build a 16-bit PNG from a raw pixel buffer.
@@ -594,48 +573,77 @@ async function buildPNG16(rawPixels, width, height, bytesPerPx, cicp) {
     return out;
 }
 
-// Downscale a 16-bit LE RGBA pixel buffer and encode as an HDR PNG with cICP.
-// Uses nearest-neighbour sampling (sufficient for thumbnail use). No ImageMagick needed.
-async function buildHdrThumb(hdrBuf, srcW, srcH, cicp, maxPx = 1280) {
-    const scale = Math.min(1, maxPx / Math.max(srcW, srcH));
-    const dstW = Math.max(1, Math.round(srcW * scale));
-    const dstH = Math.max(1, Math.round(srcH * scale));
-
-    if (scale >= 1) {
-        // Already within target size — re-encode as-is
-        return new Blob([await buildPNG16(hdrBuf, srcW, srcH, 8, cicp)], { type: 'image/png' });
-    }
-
-    const srcBytesPerPx = 8; // 4 ch × 2 bytes LE
-    const dstBuf = new Uint8Array(dstW * dstH * srcBytesPerPx);
-
-    // Sample a single source pixel (LE uint16 per channel)
-    function sampleSrc(sx, sy, ch) {
-        const x = Math.min(Math.max(Math.round(sx), 0), srcW - 1);
-        const y = Math.min(Math.max(Math.round(sy), 0), srcH - 1);
-        const base = (y * srcW + x) * srcBytesPerPx + ch * 2;
-        return hdrBuf[base] | (hdrBuf[base + 1] << 8);
-    }
-
+// Box-filter (area-average) downscaler for Uint16Array pixels (4 channels).
+// Averages all source pixels that overlap each destination pixel, weighted by
+// coverage area. Far better than nearest-neighbour for large downscale ratios.
+function _boxDownscale(src, srcW, srcH, dstW, dstH) {
+    const dst    = new Uint16Array(dstW * dstH * 4);
+    const scaleX = srcW / dstW;
+    const scaleY = srcH / dstH;
     for (let dy = 0; dy < dstH; dy++) {
+        const sy0 = dy * scaleY, sy1 = Math.min(sy0 + scaleY, srcH);
+        const iy0 = Math.floor(sy0), iy1 = Math.min(Math.ceil(sy1), srcH);
         for (let dx = 0; dx < dstW; dx++) {
-            const di = (dy * dstW + dx) * srcBytesPerPx;
-            for (let c = 0; c < 4; c++) {
-                const v = sampleSrc(dx / scale, dy / scale, c);
-                dstBuf[di + c * 2]     =  v & 0xff;
-                dstBuf[di + c * 2 + 1] = (v >> 8) & 0xff;
+            const sx0 = dx * scaleX, sx1 = Math.min(sx0 + scaleX, srcW);
+            const ix0 = Math.floor(sx0), ix1 = Math.min(Math.ceil(sx1), srcW);
+            let r = 0, g = 0, b = 0, a = 0, w = 0;
+            for (let iy = iy0; iy < iy1; iy++) {
+                const wy = Math.min(iy + 1, sy1) - Math.max(iy, sy0);
+                for (let ix = ix0; ix < ix1; ix++) {
+                    const wt = wy * (Math.min(ix + 1, sx1) - Math.max(ix, sx0));
+                    const si = (iy * srcW + ix) * 4;
+                    r += src[si]   * wt;
+                    g += src[si+1] * wt;
+                    b += src[si+2] * wt;
+                    a += src[si+3] * wt;
+                    w += wt;
+                }
             }
+            const di = (dy * dstW + dx) * 4;
+            dst[di]   = Math.round(r / w);
+            dst[di+1] = Math.round(g / w);
+            dst[di+2] = Math.round(b / w);
+            dst[di+3] = Math.round(a / w);
         }
     }
-
-    const png = await buildPNG16(dstBuf, dstW, dstH, srcBytesPerPx, cicp);
-    return new Blob([png], { type: 'image/png' });
+    return dst;
 }
 
-// ─── Non-JXR → PNG (via ImageMagick WASM) ────────────────────────────────────
-// For all formats other than JXR, delegates to ImageMagick for decoding, then
-// re-encodes to a true 16-bit PNG in pure JS (the WASM build's Png format write
-// is locked to 8-bit). Preserves cICP from AVIF sources.
+// Downscale a 16-bit LE RGBA pixel buffer and encode as a 12-bit BT.2020 PQ AVIF thumbnail.
+async function buildHdrThumb(hdrBuf, srcW, srcH, cicp, maxPx = IMAGE_CONFIG.thumbMaxPx) {
+    const scale = Math.min(1, maxPx / Math.max(srcW, srcH));
+    const dstW  = Math.max(1, Math.round(srcW * scale));
+    const dstH  = Math.max(1, Math.round(srcH * scale));
+
+    // Unpack 16-bit LE Uint8Array → Uint16Array (4ch) for the box filter
+    const numSrcPx = srcW * srcH;
+    const src16 = new Uint16Array(numSrcPx * 4);
+    for (let i = 0; i < numSrcPx; i++) {
+        src16[i*4]   = hdrBuf[i*8]   | (hdrBuf[i*8+1] << 8);
+        src16[i*4+1] = hdrBuf[i*8+2] | (hdrBuf[i*8+3] << 8);
+        src16[i*4+2] = hdrBuf[i*8+4] | (hdrBuf[i*8+5] << 8);
+        src16[i*4+3] = hdrBuf[i*8+6] | (hdrBuf[i*8+7] << 8);
+    }
+
+    const downscaled = scale < 1 ? _boxDownscale(src16, srcW, srcH, dstW, dstH) : src16;
+
+    // Shift 16-bit → 12-bit and set alpha opaque for the AVIF encoder
+    const numDstPx = dstW * dstH;
+    const u16pq = new Uint16Array(numDstPx * 4);
+    for (let i = 0; i < numDstPx; i++) {
+        u16pq[i*4]   = downscaled[i*4]   >> 4;
+        u16pq[i*4+1] = downscaled[i*4+1] >> 4;
+        u16pq[i*4+2] = downscaled[i*4+2] >> 4;
+        u16pq[i*4+3] = 4095;
+    }
+
+    try {
+        return await _encodeToAVIF(u16pq, dstW, dstH, { quality: IMAGE_CONFIG.thumbAvifQuality, speed: IMAGE_CONFIG.thumbAvifSpeed });
+    } catch (err) {
+        throw new Error(`[buildHdrThumb] AVIF encode failed: ${err.message}`);
+    }
+}
+
 // ─── HDR / EXR → PNG conversion ──────────────────────────────────────────────
 // Both formats are decoded in pure JS without ImageMagick:
 //   .hdr — Radiance RGBE, decoded by _decodeRGBE.
@@ -911,11 +919,12 @@ async function convertHdrExrToPNG(file) {
         hdrBuf[hi + 6] = 0xff; // alpha lo
         hdrBuf[hi + 7] = 0xff; // alpha hi (= 65535 opaque)
 
-        // SDR PNG: ICtCp tonemap → sRGB gamma via LUT
+        // SDR PNG: ICtCp tonemap → sRGB gamma via LUT + Bayer dithering
         const [rt, gt, bt] = tonemapICtCp_global(r, g, b, maxYInPQ);
-        sdrBuf[si]     = Math.round(_srgbLut(rt) * 255);
-        sdrBuf[si + 1] = Math.round(_srgbLut(gt) * 255);
-        sdrBuf[si + 2] = Math.round(_srgbLut(bt) * 255);
+        const _bx2 = i % w, _by2 = (i / w) | 0, _bi2 = (_by2 & 3) * 4 + (_bx2 & 3);
+        sdrBuf[si]     = Math.min(255, Math.max(0, Math.round(_srgbLut(rt) * 255 + _BAYER_IP_R[_bi2])));
+        sdrBuf[si + 1] = Math.min(255, Math.max(0, Math.round(_srgbLut(gt) * 255 + _BAYER_IP_G[_bi2])));
+        sdrBuf[si + 2] = Math.min(255, Math.max(0, Math.round(_srgbLut(bt) * 255 + _BAYER_IP_B[_bi2])));
         sdrBuf[si + 3] = 255;
 
         // Gamut classification on original BT.709 linear values (reuses r2020/g2020c/b2020)
@@ -942,12 +951,11 @@ async function convertHdrExrToPNG(file) {
         };
     }
 
-    // ── SDR PNG ───────────────────────────────────────────────────────────────
-    const sdrPng = await buildPNG8(sdrBuf, w, h);
-    const sdrFile = new File([sdrPng], outputName.replace('.png', '_SDR.png'), { type: 'image/png' });
+    // ── SDR (AVIF > WebP > PNG) ───────────────────────────────────────────────
+    const sdrFile = await _encodeSdrBlob(sdrBuf, w, h, outputName.replace(/\.[^.]+$/, ''));
 
-    // ── Thumbnail (downscaled HDR PNG, ≤1280px) ───────────────────────────────
-    const thumbBlob = await buildHdrThumb(hdrBuf, w, h, cicp, 1280);
+    // ── Thumbnail (downscaled 12-bit PQ AVIF, ≤1280px) ───────────────────────
+    const thumbBlob = await buildHdrThumb(hdrBuf, w, h, cicp, IMAGE_CONFIG.thumbMaxPx);
 
     return { hdrFile, sdrBlob: sdrFile, thumbBlob };
 }
@@ -972,11 +980,13 @@ async function _getAvifDecoder() {
 
 // Encodes a Uint16Array of 12-bit BT.2020 PQ RGBA pixels → AVIF blob.
 // Patches the colr box to BT.2020 primaries / PQ transfer / full-range.
-async function _encodeToAVIF(u16pq, width, height) {
+async function _encodeToAVIF(u16pq, width, height, opts = {}) {
     const encode = await _getAvifEncoder();
-    const avifBuf = await encode({ data: u16pq, width, height }, {
-        bitDepth: 12, quality: 90, yuvFormat: 'YUV444', matrixCoefficients: 9, speed: 10,
-    });
+    const _hdrLossless = IMAGE_CONFIG.hdrLossless === true;
+    const _hdrBaseOpts = _hdrLossless
+        ? { bitDepth: 12, lossless: true, yuvFormat: 'YUV444', matrixCoefficients: 9, speed: IMAGE_CONFIG.hdrAvifSpeed, tileRowsLog2: IMAGE_CONFIG.hdrTileRowsLog2, tileColsLog2: IMAGE_CONFIG.hdrTileColsLog2 }
+        : { bitDepth: 12, quality: IMAGE_CONFIG.hdrAvifQuality, yuvFormat: 'YUV444', matrixCoefficients: 9, speed: IMAGE_CONFIG.hdrAvifSpeed, tileRowsLog2: IMAGE_CONFIG.hdrTileRowsLog2, tileColsLog2: IMAGE_CONFIG.hdrTileColsLog2, tune: IMAGE_CONFIG.hdrTune };
+    const avifBuf = await encode({ data: u16pq, width, height }, { ..._hdrBaseOpts, ...opts });
     const data = new Uint8Array(avifBuf);
     const view = new DataView(avifBuf);
     function patchColr(d, v, start, end) {
@@ -1063,7 +1073,7 @@ function _statsFromU12PQ(u16pq, width, height) {
 
 // ─── Any Format → AVIF ────────────────────────────────────────────────────────
 // Converts any supported HDR format directly to a 12-bit BT.2020 PQ AVIF.
-// Returns { hdrFile, sdrBlob, thumbBlob } — same shape as convertToPNG.
+// Returns { hdrFile, sdrBlob, thumbBlob }.
 // hdrFile has _avifStats attached so getBasicImageMetadata never needs to re-decode.
 async function convertToAVIF(file) {
     const ext = getFileExtension(file.name);
@@ -1095,8 +1105,14 @@ async function convertToAVIF(file) {
         hdrFile._avifStats = _statsFromU12PQ(u16pq, width, height);
         if (file._jxrGamut) hdrFile._avifStats.gamutCoverage = file._jxrGamut;
 
-        const sdrBlob   = await convertToSDR(file, file.name);
-        const thumbBlob = await generateThumb(file, 1280);
+        const sdrBlob = await convertToSDR(file, file.name);
+
+        const thumbScale = Math.min(1, IMAGE_CONFIG.thumbMaxPx / Math.max(width, height));
+        const thumbW     = Math.max(1, Math.round(width  * thumbScale));
+        const thumbH     = Math.max(1, Math.round(height * thumbScale));
+        const thumbU16   = thumbScale < 1 ? _boxDownscale(u16pq, width, height, thumbW, thumbH) : u16pq;
+        const thumbBlob  = await _encodeToAVIF(thumbU16, thumbW, thumbH, { quality: IMAGE_CONFIG.thumbAvifQuality, speed: IMAGE_CONFIG.thumbAvifSpeed });
+
         return { hdrFile, sdrBlob, thumbBlob };
     }
 
@@ -1131,10 +1147,24 @@ async function convertToAVIF(file) {
         return _floatsToAVIF(getLinear, channels, width, height, outputName);
     }
 
-    // ── AVIF input: re-encode at 12-bit ──────────────────────────────────────
+    // ── AVIF input: decode via @jsquash/avif, re-encode at 12-bit ────────────
     if (ext === '.avif') {
-        const r = await convertToPNG(file);
-        return convertToAVIF(r.hdrFile);
+        const avifDecode = await _getAvifDecoder();
+        const { data: u16pq, width, height } = await avifDecode(await file.arrayBuffer(), { bitDepth: 12 });
+
+        const avifBlob = await _encodeToAVIF(u16pq, width, height);
+        const hdrFile  = new File([avifBlob], outputName, { type: 'image/avif' });
+        hdrFile._avifStats = _statsFromU12PQ(u16pq, width, height);
+
+        const sdrBlob = await convertToSDR(hdrFile, hdrFile.name);
+
+        const thumbScale = Math.min(1, IMAGE_CONFIG.thumbMaxPx / Math.max(width, height));
+        const thumbW     = Math.max(1, Math.round(width  * thumbScale));
+        const thumbH     = Math.max(1, Math.round(height * thumbScale));
+        const thumbU16   = thumbScale < 1 ? _boxDownscale(u16pq, width, height, thumbW, thumbH) : u16pq;
+        const thumbBlob  = await _encodeToAVIF(thumbU16, thumbW, thumbH, { quality: IMAGE_CONFIG.thumbAvifQuality, speed: IMAGE_CONFIG.thumbAvifSpeed });
+
+        return { hdrFile, sdrBlob, thumbBlob };
     }
 
     throw new Error(`convertToAVIF: unsupported format "${ext}"`);
@@ -1176,82 +1206,29 @@ async function _floatsToAVIF(getLinear, channels, width, height, outputName) {
         sdrBuf[i*4+2]=Math.round(_srgbLut(bt)*255); sdrBuf[i*4+3]=255;
     }
 
+    // ── Thumbnail — encode BEFORE full-res to avoid WASM heap pressure ───────
+    // Downscale u16pq directly to ≤thumbMaxPx and encode as AVIF.
+    const thumbScale = Math.min(1, IMAGE_CONFIG.thumbMaxPx / Math.max(width, height));
+    const thumbW = Math.max(1, Math.round(width  * thumbScale));
+    const thumbH = Math.max(1, Math.round(height * thumbScale));
+    let thumbBlob;
+    try {
+        const thumbU16 = thumbScale < 1
+            ? _boxDownscale(u16pq, width, height, thumbW, thumbH)
+            : u16pq;
+        thumbBlob = await _encodeToAVIF(thumbU16, thumbW, thumbH, { quality: IMAGE_CONFIG.thumbAvifQuality, speed: IMAGE_CONFIG.thumbAvifSpeed });
+    } catch (err) {
+        console.error('[convertToAVIF] thumbnail AVIF encode failed:', err);
+        thumbBlob = null;
+    }
+
     const avifBlob = await _encodeToAVIF(u16pq, width, height);
     const hdrFile  = new File([avifBlob], outputName, { type: 'image/avif' });
     hdrFile._avifStats = _statsFromU12PQ(u16pq, width, height);
 
-    const sdrPng   = await buildPNG8(sdrBuf, width, height);
-    const sdrBlob  = new File([sdrPng], outputName.replace('.avif','_SDR.png'), { type:'image/png' });
-
-    // Thumb: build a small HDR PNG from the 12-bit buffer (shift up to 16-bit LE)
-    const hdrBuf16 = new Uint8Array(numPixels*8);
-    for (let i=0; i<numPixels; i++) {
-        const v0=u16pq[i*4]<<4, v1=u16pq[i*4+1]<<4, v2=u16pq[i*4+2]<<4;
-        hdrBuf16[i*8]=v0&0xff; hdrBuf16[i*8+1]=(v0>>8)&0xff;
-        hdrBuf16[i*8+2]=v1&0xff; hdrBuf16[i*8+3]=(v1>>8)&0xff;
-        hdrBuf16[i*8+4]=v2&0xff; hdrBuf16[i*8+5]=(v2>>8)&0xff;
-        hdrBuf16[i*8+6]=0xff; hdrBuf16[i*8+7]=0xff;
-    }
-    const thumbBlob = await buildHdrThumb(hdrBuf16, width, height, {primaries:9,transfer:16}, 1280);
+    const sdrBlob  = await _encodeSdrBlob(sdrBuf, width, height, outputName.replace(/\.[^.]+$/, ''));
 
     return { hdrFile, sdrBlob, thumbBlob };
-}
-
-async function convertToPNG(file) {
-    const ext = getFileExtension(file.name);
-
-    // JXR is handled by convertJxrToPNG — forward its full result including sdrBlob/thumbBlob
-    if (ext === '.jxr') {
-        return await convertJxrToPNG(file);
-    }
-
-    // HDR (Radiance RGBE) and EXR (OpenEXR) contain linear HDR values above 1.0.
-    // ImageMagick's standard RGBA output clips to [0,1], losing all HDR headroom.
-    // Route them through convertHdrExrToPNG which reads as float32 to preserve it.
-    if (ext === '.hdr' || ext === '.exr') {
-        return await convertHdrExrToPNG(file);
-    }
-
-    const { ImageMagick, MagickFormat } = await getMagick();
-    const arrayBuffer = await file.arrayBuffer();
-    const inputData = new Uint8Array(arrayBuffer);
-    const outputName = file.name.replace(/\.[^.]+$/, '.png');
-
-    // Extract cICP from source before handing off to ImageMagick (which may strip it)
-    let cicp = null;
-    if (ext === '.avif') cicp = parseAVIFCICP(inputData);
-
-    const imageInfo = await new Promise((resolve, reject) => {
-        try {
-            ImageMagick.read(inputData, (image) => {
-                const w = image.width, h = image.height;
-                image.depth = 16;
-                // Write raw RGBA to get true 16-bit samples; MagickFormat.Png is 8-bit in this build.
-                image.write((data) => {
-                    const raw = new Uint8Array(data);
-                    const bytesPerPx = raw.length / (w * h);
-                    resolve({ w, h, raw, bytesPerPx });
-                }, MagickFormat.Rgba);
-            });
-        } catch(err) { reject(err); }
-    });
-
-    const finalData = await buildPNG16(imageInfo.raw, imageInfo.w, imageInfo.h, imageInfo.bytesPerPx, cicp);
-    const hdrBlob = new Blob([finalData], { type: 'image/png' });
-    const hdrFile = new File([hdrBlob], outputName, { type: 'image/png' });
-
-    // ── SDR blob for PQ AVIF sources ──────────────────────────────────────────
-    // We can't use the ImageMagick raw RGBA buffer for tone-mapping: ImageMagick clips
-    // linear light to [0, 1] when decoding, losing all HDR headroom above 80 nits.
-    // Instead, run the freshly-built HDR PNG (PQ-encoded, BT.2020, with cICP) through
-    // the same pure-JS pipeline that convertToSDR uses for 16-bit PQ PNGs — this is
-    // the only path that correctly reconstructs the full HDR luminance range.
-    let sdrBlob = null;
-    if (cicp && cicp.transfer === 16) {
-        sdrBlob = await convertToSDR(hdrFile, outputName);
-    }
-
-    return { hdrFile, sdrBlob, thumbBlob: null };
 }
 
 // ─── Binary Parsers ───────────────────────────────────────────────────────────
@@ -1381,7 +1358,7 @@ function crc32(data, seed = 0) {
 // conversions (multiple uploads at once) never share state.
 function _tonemapOnWorker(pixels, width, height, samplesPerPixel) {
     return new Promise((resolve, reject) => {
-        const worker = new Worker('./tonemap-worker.js');
+        const worker = new Worker('./tonemap-worker.js', { type: 'module' });
         worker.onmessage = (e) => {
             worker.terminate();
             if (e.data.error) reject(new Error(e.data.error));
@@ -1436,8 +1413,7 @@ async function convertToSDR(blob, filename) {
         // pixels is transferred zero-copy; the Uint8Array is detached after the call.
         const sdrBuf = await _tonemapOnWorker(pixels, width, height, samplesPerPixel);
 
-        const sdrPng = await buildPNG8(sdrBuf, width, height);
-        return new File([sdrPng], sdrFilename, { type: 'image/png' });
+        return _encodeSdrBlob(sdrBuf, width, height, filename.replace(/\.[^.]+$/, ''));
     }
 
     // ── Canvas fallback for sRGB / non-PQ images ──────────────────────────────
@@ -1466,92 +1442,14 @@ async function convertToSDR(blob, filename) {
                 data[i + 2] = Math.max(0, Math.min(255, Math.round(_srgbLut(bt) * 255)));
             }
             ctx.putImageData(imageData, 0, 0);
-            canvas.toBlob((sdrBlob) => {
-                if (sdrBlob) resolve(new File([sdrBlob], sdrFilename, { type: 'image/png' }));
-                else         reject(new Error('Failed to convert to SDR'));
-            }, 'image/png');
+            try {
+                resolve(await _encodeSdrBlob(imageData.data, canvas.width, canvas.height, filename.replace(/\.[^.]+$/, '')));
+            } catch (e) {
+                reject(e);
+            }
         };
         img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Failed to load image for SDR conversion')); };
         img.src = url;
-    });
-}
-
-// ─── HDR Thumbnail Generation ─────────────────────────────────────────────────
-// Downscales an HDR PNG to ≤maxWidth px on the longest edge via ImageMagick,
-// then re-injects the cICP chunk (which ImageMagick strips during resize).
-// Tries lossless WebP first; falls back to 16-bit PNG.
-async function generateThumb(blob, maxWidth = 1280) {
-    const { ImageMagick, MagickFormat } = await getMagick();
-    const arrayBuffer = await blob.arrayBuffer();
-    const inputData = new Uint8Array(arrayBuffer);
-
-    // Preserve cICP before ImageMagick processes the file
-    let cicp = null;
-    {
-        const d = inputData;
-        let o = 8;
-        while (o < d.length - 8) {
-            const len = (d[o]<<24|d[o+1]<<16|d[o+2]<<8|d[o+3])>>>0;
-            const t = String.fromCharCode(d[o+4],d[o+5],d[o+6],d[o+7]);
-            if (t === 'cICP') { cicp = { primaries: d[o+8], transfer: d[o+9] }; break; }
-            if (t === 'IDAT' || t === 'IEND') break;
-            o += 12 + len;
-        }
-    }
-
-    return new Promise((resolve, reject) => {
-        try {
-            ImageMagick.read(inputData, (image) => {
-                if (image.width <= maxWidth && image.height <= maxWidth) {
-                    resolve(null); // already small enough
-                    return;
-                }
-
-                // Resize to fit within maxWidth, preserving aspect ratio
-                if (image.width >= image.height) {
-                    image.resize(maxWidth, Math.round(maxWidth * image.height / image.width));
-                } else {
-                    image.resize(Math.round(maxWidth * image.width / image.height), maxWidth);
-                }
-                image.depth = 16;
-
-                // Try lossless WebP; fall back to PNG if the codec isn't available.
-                // For PQ/HLG sources always use PNG — WebP has no standardised cICP
-                // support, so ImageMagick strips the HDR metadata, producing an SDR blob.
-                const isHDR = cicp && (cicp.transfer === 16 || cicp.transfer === 18);
-                const tryWebP = () => {
-                    try {
-                        image.quality = 0; // signals lossless in ImageMagick
-                        image.write((data) => {
-                            resolve(new Blob([data], { type: 'image/webp' }));
-                        }, MagickFormat.WebP);
-                    } catch (e) {
-                        tryPNG();
-                    }
-                };
-
-                const tryPNG = () => {
-                    try {
-                        image.write(async (data) => {
-                            try {
-                                const withCicp = cicp
-                                    ? await reinjectCICP(new Uint8Array(data), cicp)
-                                    : data;
-                                resolve(new Blob([withCicp], { type: 'image/png' }));
-                            } catch (e) {
-                                resolve(new Blob([data], { type: 'image/png' }));
-                            }
-                        }, MagickFormat.Png);
-                    } catch (e) {
-                        reject(e);
-                    }
-                };
-
-                if (isHDR) tryPNG(); else tryWebP();
-            });
-        } catch (err) {
-            reject(err);
-        }
     });
 }
 

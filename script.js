@@ -10,7 +10,99 @@ const CONFIG = {
     zoomScale:  3,    // magnification level when holding down on an image
     zoomInMs:   80,   // transition duration when zooming in  (ms)
     zoomOutMs:  120,  // transition duration when zooming out (ms)
+    rawgKey:    '2ed92fc542034b3ea93847700be1043b',
 };
+// ─── RAWG Banner Cache ────────────────────────────────────────────────────────
+// Two-level cache: in-memory Map for the current session, localStorage for
+// persistence across page refreshes. Entries expire after 7 days so renamed
+// games or updated RAWG artwork eventually get a fresh fetch.
+const _BANNER_CACHE_KEY = 'rawgBannerCache_v1';
+const _BANNER_CACHE_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days in ms
+const _rawgBannerCache  = new Map(); // in-memory layer
+
+function _loadBannerStore() {
+    try { return JSON.parse(localStorage.getItem(_BANNER_CACHE_KEY) || '{}'); } catch { return {}; }
+}
+function _saveBannerStore(store) {
+    try { localStorage.setItem(_BANNER_CACHE_KEY, JSON.stringify(store)); } catch {}
+}
+function _bannerStoreGet(gameName) {
+    const store = _loadBannerStore();
+    const entry = store[gameName];
+    if (!entry) return undefined;
+    if (Date.now() - entry.ts > _BANNER_CACHE_TTL) { delete store[gameName]; _saveBannerStore(store); return undefined; }
+    return entry.url; // may be null (cached "no result")
+}
+function _bannerStoreSet(gameName, url) {
+    const store = _loadBannerStore();
+    store[gameName] = { url, ts: Date.now() };
+    _saveBannerStore(store);
+}
+
+async function _fetchRawgBannerImage(gameName) {
+    // 1. In-memory hit
+    if (_rawgBannerCache.has(gameName)) return _rawgBannerCache.get(gameName);
+    // 2. localStorage hit (survives refresh, expires after 7 days)
+    const stored = _bannerStoreGet(gameName);
+    if (stored !== undefined) { _rawgBannerCache.set(gameName, stored); return stored; }
+    // 3. Network fetch
+    try {
+        const results = await searchRawg(gameName);
+        // Prefer an exact name match, otherwise use first result
+        const match = results.find(r => r.name.toLowerCase() === gameName.toLowerCase()) || results[0];
+        const img = match?.background_image || null;
+        _rawgBannerCache.set(gameName, img);
+        _bannerStoreSet(gameName, img);
+        return img;
+    } catch {
+        _rawgBannerCache.set(gameName, null);
+        return null;
+    }
+}
+
+// Renders the styled game banner into .gallery-section-header.
+// If the URL is already cached (in-memory or localStorage) it renders
+// instantly with no skeleton flash. Otherwise shows a skeleton while fetching.
+async function _showGameBanner(gameName) {
+    const sectionHeader = document.querySelector('.gallery-section-header');
+    if (!sectionHeader) return;
+
+    // Check both cache layers synchronously before touching the DOM
+    const cachedUrl = _rawgBannerCache.has(gameName) ? _rawgBannerCache.get(gameName) : _bannerStoreGet(gameName);
+    const isInstant = cachedUrl !== undefined;
+
+    const bgStyle = (isInstant && cachedUrl) ? `style="background-image:url(${cachedUrl})"` : '';
+    sectionHeader.style.display = '';
+    sectionHeader.innerHTML = `
+        <div class="game-banner-header${isInstant ? '' : ' banner-loading'}" ${bgStyle}>
+            <div class="game-banner-overlay"></div>
+            <span class="game-banner-title">${gameName}</span>
+            <button class="game-banner-close" aria-label="Clear search">
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+        </div>`;
+
+    sectionHeader.querySelector('.game-banner-close').addEventListener('click', () => {
+        gameSearchQuery = '';
+        const input   = document.getElementById('gallerySearchInput');
+        const clearBtn = document.getElementById('gallerySearchClear');
+        if (input)    input.value = '';
+        if (clearBtn) clearBtn.style.display = 'none';
+        renderGallery(_allGalleryItems);
+    });
+
+    if (isInstant) return; // already rendered with correct image
+
+    const bannerEl = sectionHeader.querySelector('.game-banner-header');
+    const imgUrl = await _fetchRawgBannerImage(gameName);
+    if (bannerEl && imgUrl) {
+        bannerEl.classList.remove('banner-loading');
+        bannerEl.style.backgroundImage = `url(${imgUrl})`;
+    } else if (bannerEl) {
+        bannerEl.classList.remove('banner-loading');
+    }
+}
+
 // ─── HDR Types ────────────────────────────────────────────────────────────────
 
 const HDR_TYPES = [
@@ -29,12 +121,53 @@ const HDR_TYPES = [
 
 let gameSearchQuery = '';
 
+// Keeps ?game= in the address bar in sync with the active filter.
+// Uses replaceState so the back button isn't polluted.
+function _syncGameUrl(gameName) {
+    const url = new URL(location.href);
+    if (gameName) {
+        url.searchParams.set('game', gameName);
+    } else {
+        url.searchParams.delete('game');
+    }
+    history.replaceState(null, '', url.toString());
+}
+
+// ─── Gallery View Mode ────────────────────────────────────────────────────────
+// 'batch' = collage cards (default) | 'list' = all images stacked vertically
+// 'list' = stacked (default / no game) | 'grid2' = 2-col | 'grid3' = 3-col
+// gameViewMode persists the user's preferred grid mode when a game IS selected.
+let galleryViewMode = 'list';
+let gameViewMode = (() => {
+    try { return localStorage.getItem('gameViewMode') || 'grid2'; } catch { return 'grid2'; }
+})();
+
+function setGalleryViewMode(mode) {
+    // Only grid2/grid3/list when a game is active; always list otherwise
+    galleryViewMode = gameSearchQuery.trim() ? mode : 'list';
+    if (gameSearchQuery.trim()) {
+        gameViewMode = mode;
+        try { localStorage.setItem('gameViewMode', mode); } catch {}
+    }
+    const gallery = document.getElementById('gallery');
+    if (gallery) {
+        gallery.classList.toggle('gallery-list-mode',  galleryViewMode === 'list');
+        gallery.classList.toggle('gallery-grid2-mode', galleryViewMode === 'grid2');
+        gallery.classList.toggle('gallery-grid3-mode', galleryViewMode === 'grid3');
+    }
+    document.querySelectorAll('.view-toggle-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.view === galleryViewMode);
+    });
+    if (_allGalleryItems.length) {
+        buildGalleryCards(_allGalleryItems);
+        renderGallery(_allGalleryItems);
+    }
+}
+
 // ─── File Handling ────────────────────────────────────────────────────────────
 
-// Supported formats
-const NATIVE_EXTENSIONS = [];                        // all formats now go through AVIF re-encode pipeline
-const CONVERT_EXTENSIONS = ['.png', '.jxr', '.exr', '.hdr', '.avif']; // all converted to AVIF on import
-const ALL_EXTENSIONS = [...NATIVE_EXTENSIONS, ...CONVERT_EXTENSIONS];
+// All supported formats go through the AVIF re-encode pipeline on import.
+const SUPPORTED_EXTENSIONS = ['.png', '.jxr', '.exr', '.hdr', '.avif'];
 
 // File validation
 function getFileExtension(filename) {
@@ -53,14 +186,8 @@ async function extractMetadataFromFile(file) {
 }
 
 function isAllowedFile(file) {
-    const filename = file && file.name ? file.name : '';
-    const extension = getFileExtension(filename);
-    return ALL_EXTENSIONS.includes(extension);
-}
-
-function needsConversion(file) {
-    const ext = getFileExtension(file.name || '');
-    return CONVERT_EXTENSIONS.includes(ext);
+    const extension = getFileExtension(file?.name ?? '');
+    return SUPPORTED_EXTENSIONS.includes(extension);
 }
 
 // ─── UI State & Globals ──────────────────────────────────────────────────────
@@ -69,11 +196,6 @@ const fileInput = document.getElementById('fileInput');
 const galleryContainer = document.getElementById('gallery');
 const statusMessage = document.getElementById('statusMessage');
 const dropZone = document.getElementById('dropZone');
-
-// Track created URLs for cleanup
-let createdUrls = [];
-// Lightbox blob URLs are tracked separately so refreshGallery() doesn't revoke them while lightbox is open
-let lightboxCreatedUrls = [];
 
 // Global details toggle state
 let globalDetailsEnabled = false;
@@ -155,16 +277,6 @@ document.addEventListener('mousemove', (e) => {
     cursorTooltip.style.left = tx + 'px';
     cursorTooltip.style.top  = ty + 'px';
 });
-
-function revokeAllUrls() {
-    createdUrls.forEach(url => URL.revokeObjectURL(url));
-    createdUrls = [];
-}
-
-function revokeLightboxUrls() {
-    lightboxCreatedUrls.forEach(url => URL.revokeObjectURL(url));
-    lightboxCreatedUrls = [];
-}
 
 // ─── Drop Zone ───────────────────────────────────────────────────────────────
 
@@ -309,7 +421,7 @@ async function showDetailsForImage(imageId) {
         if (existing) existing.remove();
         
         // Show the overlay without a trigger button (global mode)
-        showMetadataOverlay(imageItem.name, metadata, wrapper, null);
+        showMetadataOverlay(imageItem.name, metadata, wrapper);
     }
 }
 
@@ -318,94 +430,6 @@ function hideAllDetailsOverlays() {
         const existing = imageData.wrapper.querySelector('.image-meta-overlay');
         if (existing) existing.remove();
     });
-}
-
-function checkVisibleImage() {
-    const visibleImageId = findVisibleImageId();
-    
-    // If we found a visible image and it's different from current, update it
-    if (visibleImageId && currentVisibleImage !== visibleImageId) {
-        const previousImage = currentVisibleImage;
-        currentVisibleImage = visibleImageId;
-        
-        // Only show/hide overlays if details mode is active
-        if (globalDetailsEnabled) {
-            // Hide previous image's overlay
-            if (previousImage && imageWrappers.has(previousImage)) {
-                const prevData = imageWrappers.get(previousImage);
-                const existing = prevData.wrapper.querySelector('.image-meta-overlay');
-                if (existing) existing.remove();
-            }
-            
-            // Show new image's overlay
-            showDetailsForImage(visibleImageId);
-        }
-    }
-    // If no image is visible (null) but we had one before, keep the previous selection
-    // This prevents losing track when scrolling quickly or during transitions
-}
-
-// Find the most visible image in the viewport
-function findVisibleImageId() {
-    const allWrappers = Array.from(document.querySelectorAll('.image-wrapper'));
-    if (allWrappers.length === 0) return null;
-    
-    const viewportCenter = window.innerHeight / 2;
-    let closestImage = null;
-    let minDistance = Infinity;
-    
-    allWrappers.forEach(wrapper => {
-        const rect = wrapper.getBoundingClientRect();
-        const imageCenter = (rect.top + rect.bottom) / 2;
-        const distance = Math.abs(imageCenter - viewportCenter);
-        
-        if (distance < minDistance) {
-            minDistance = distance;
-            closestImage = wrapper;
-        }
-    });
-    
-    return closestImage ? parseInt(closestImage.dataset.imageId) : null;
-}
-
-let visibilityCheckInterval = null;
-
-function startVisibilityChecker() {
-    if (visibilityCheckInterval) return;
-    
-    let scrollTimeout = null;
-    
-    // Check on scroll with debounce
-    const handleScroll = () => {
-        if (scrollTimeout) return; // Already scheduled
-        
-        scrollTimeout = setTimeout(() => {
-            checkVisibleImage();
-            scrollTimeout = null;
-        }, 50); // 50ms debounce
-    };
-    
-    window.addEventListener('scroll', handleScroll, { passive: true });
-    
-    // Also check periodically in case images load/resize
-    visibilityCheckInterval = setInterval(checkVisibleImage, 100);
-    
-    // Initial check
-    setTimeout(checkVisibleImage, 100);
-    
-    // Store cleanup function
-    visibilityCheckInterval.cleanup = () => {
-        window.removeEventListener('scroll', handleScroll);
-        if (scrollTimeout) clearTimeout(scrollTimeout);
-        clearInterval(visibilityCheckInterval);
-        visibilityCheckInterval = null;
-    };
-}
-
-function stopVisibilityChecker() {
-    if (visibilityCheckInterval && visibilityCheckInterval.cleanup) {
-        visibilityCheckInterval.cleanup();
-    }
 }
 
 // ─── File Processing ─────────────────────────────────────────────────────────
@@ -449,8 +473,7 @@ async function processFiles(selectedFiles) {
     }
     const { hdrType, gameName: importGameName, spoiler: importSpoiler, additionalInfo: importAdditionalInfo } = importResult;
 
-    const toConvert = allowedFiles.filter(needsConversion);
-    const native = allowedFiles.filter(f => !needsConversion(f));
+    const toConvert = allowedFiles; // all formats go through the AVIF pipeline
 
     // ── Per-step timing helpers ──────────────────────────────────────────────────
     const _importT0 = performance.now();
@@ -460,18 +483,7 @@ async function processFiles(selectedFiles) {
     }
 
     try {
-        // Pre-load ImageMagick if any files need conversion
         initProgress(allowedFiles.length, toConvert.length > 0);
-
-        if (toConvert.length > 0) {
-            const needsMagick = toConvert.some(f => getFileExtension(f.name) !== '.jxr');
-            if (needsMagick) {
-                setProgressStep('convert', 'Loading converter…');
-                const _t = performance.now();
-                await getMagick();
-                _importLog('getMagick', _t);
-            }
-        }
 
         const batchId = generateBatchId();
         for (const file of allowedFiles) {
@@ -482,8 +494,8 @@ async function processFiles(selectedFiles) {
             let prebuiltSdr = null;
             let prebuiltThumb = null;
 
-            // Convert to PNG first if needed
-            if (needsConversion(file)) {
+            // Convert to AVIF (all formats go through this pipeline)
+            if (true) {
                 setProgressStep('convert', file.name);
                 try {
                     const _t = performance.now();
@@ -526,23 +538,7 @@ async function processFiles(selectedFiles) {
                 console.log('[processFiles] skipping convertToSDR, using prebuilt:', prebuiltSdr?.size);
             }
 
-
-            let thumbBlob = prebuiltThumb;
-            if (!thumbBlob) {
-                _progressFileLabel = `Thumbnail: ${hdrFile.name}`;
-                _renderProgress();
-                const _t = performance.now();
-                try {
-                    thumbBlob = await generateThumb(hdrFile, 1280);
-                    _importLog(`generateThumb: ${hdrFile.name}`, _t);
-                    console.log('[processFiles] generateThumb done:', thumbBlob?.size);
-                } catch (error) {
-                    console.error('Thumbnail generation failed:', error);
-                }
-            } else {
-                console.log('[processFiles] skipping generateThumb, using prebuilt thumb:', prebuiltThumb?.size);
-            }
-
+            const thumbBlob = prebuiltThumb;
 
             _progressFileLabel = `Saving: ${hdrFile.name}`;
             _renderProgress();
@@ -576,26 +572,34 @@ let _galleryCards = new Map();
 // Build (or rebuild) all cards from scratch and render them all visible.
 // Called by refreshGallery after a real data change (import / delete / edit).
 function buildGalleryCards(allItems) {
-    revokeAllUrls();
     galleryContainer.innerHTML = '';
     imageWrappers.clear();
     currentVisibleImage = null;
     _galleryCards.clear();
+
+    // Apply current view mode classes
+    galleryContainer.classList.toggle('gallery-list-mode',  galleryViewMode === 'list');
+    galleryContainer.classList.toggle('gallery-grid2-mode', galleryViewMode === 'grid2');
+    galleryContainer.classList.toggle('gallery-grid3-mode', galleryViewMode === 'grid3');
 
     if (!allItems.length) {
         statusMessage.textContent = 'No HDR images yet. Drop or upload PNG, AVIF, JXR, EXR, HDR, TIFF, or HEIC files.';
         return;
     }
 
-    // Build one card per batch
-    const batchMap = new Map();
+    // In grid2/grid3 (game selected) merge all items into one card per game.
+    // In list mode keep the original per-batch grouping.
+    const _isGameGrouped = galleryViewMode === 'grid2' || galleryViewMode === 'grid3';
+    const cardMap = new Map();
     for (const item of allItems) {
-        const key = item.batchId || `solo_${item.id}`;
-        if (!batchMap.has(key)) batchMap.set(key, []);
-        batchMap.get(key).push(item);
+        const key = (_isGameGrouped && item.gameName)
+            ? `game:${item.gameName}`
+            : (item.batchId || `solo_${item.id}`);
+        if (!cardMap.has(key)) cardMap.set(key, []);
+        cardMap.get(key).push(item);
     }
-    for (const [key, batchItems] of batchMap.entries()) {
-        const card = createCollageCard(batchItems);
+    for (const [key, groupItems] of cardMap.entries()) {
+        const card = createCollageCard(groupItems, _isGameGrouped, galleryViewMode);
         _galleryCards.set(key, card);
         galleryContainer.appendChild(card);
     }
@@ -608,27 +612,62 @@ function buildGalleryCards(allItems) {
 function renderGallery(allItems) {
     if (!allItems.length) return;
 
-    const filtered = applyFilters(allItems);
-    const visibleKeys = new Set();
-    for (const item of filtered) {
-        visibleKeys.add(item.batchId || `solo_${item.id}`);
+    // Keep the address bar in sync with the active game filter
+    _syncGameUrl(gameSearchQuery.trim());
+
+    const hasGame = !!gameSearchQuery.trim();
+
+    // Sync view mode: no game → always list; game → use saved gameViewMode
+    const targetMode = hasGame ? gameViewMode : 'list';
+    if (galleryViewMode !== targetMode) {
+        galleryViewMode = targetMode;
+        galleryContainer.classList.toggle('gallery-list-mode',  galleryViewMode === 'list');
+        galleryContainer.classList.toggle('gallery-grid2-mode', galleryViewMode === 'grid2');
+        galleryContainer.classList.toggle('gallery-grid3-mode', galleryViewMode === 'grid3');
+        // Cards need rebuilding when the grouping strategy changes
+        buildGalleryCards(allItems);
     }
 
-    // Use a DocumentFragment to batch all insertions in one reflow
+    // Show/hide view toggle
+    const viewToggle = document.querySelector('.view-toggle');
+    if (viewToggle) viewToggle.style.display = hasGame ? 'flex' : 'none';
+    document.querySelectorAll('.view-toggle-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.view === galleryViewMode);
+    });
+
+    const filtered = applyFilters(allItems);
+    const _isGameGrouped = galleryViewMode === 'grid2' || galleryViewMode === 'grid3';
+    const visibleKeys = new Set();
+    for (const item of filtered) {
+        const key = (_isGameGrouped && item.gameName)
+            ? `game:${item.gameName}`
+            : (item.batchId || `solo_${item.id}`);
+        visibleKeys.add(key);
+    }
+
     const fragment = document.createDocumentFragment();
-    let visibleCount = 0;
     for (const [key, card] of _galleryCards.entries()) {
         if (visibleKeys.has(key)) {
             fragment.appendChild(card);
-            visibleCount++;
         } else {
-            // Detach without destroying — card retains its blob URLs and event listeners
             if (card.parentNode) card.parentNode.removeChild(card);
         }
     }
     galleryContainer.appendChild(fragment);
 
-    // status message disabled
+    galleryContainer.classList.toggle('gallery-filtered', hasGame);
+
+    // Section header: game banner or "Latest Uploads"
+    const sectionHeader = document.querySelector('.gallery-section-header');
+    if (sectionHeader) {
+        if (hasGame) {
+            const exactGame = filtered[0]?.gameName || gameSearchQuery.trim();
+            if (exactGame) _showGameBanner(exactGame);
+        } else {
+            sectionHeader.style.display = 'flex';
+            sectionHeader.innerHTML = '<span class="gallery-section-title">Latest Uploads</span>';
+        }
+    }
 }
 
 async function refreshGallery() {
@@ -651,7 +690,7 @@ async function refreshGallery() {
 
 // ─── Collage Card (gallery view) ─────────────────────────────────────────────
 
-function createCollageCard(batchItems) {
+function createCollageCard(batchItems, isGameGrouped = false, viewMode = 'list') {
     const card = document.createElement('div');
     card.className = 'collage-card';
 
@@ -663,19 +702,39 @@ function createCollageCard(batchItems) {
     header.appendChild(document.createElement('div'));
 
     const titleEl = document.createElement('span');
-    titleEl.className = 'collage-title';
     const _titleName = batchItems[0].gameName || 'Unknown Game';
+    const _isUnknown = !batchItems[0].gameName;
     const _titleCount = batchItems.length;
+    titleEl.className = _isUnknown ? 'collage-title' : 'collage-title collage-title-link';
     titleEl.textContent = _titleName;
-    const _countBadge = document.createElement('span');
+    if (!_isUnknown) {
+        titleEl.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const input = document.getElementById('gallerySearchInput');
+            const clearBtn = document.getElementById('gallerySearchClear');
+            if (input) {
+                gameSearchQuery = _titleName;
+                input.value = _titleName;
+                if (clearBtn) clearBtn.style.display = 'flex';
+                renderGallery(_allGalleryItems);
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+            }
+        });
+    }
     header.appendChild(titleEl);
+
+    const _countBadge = document.createElement('span');
+    _countBadge.className = 'collage-title-count-badge';
+    _countBadge.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>${_titleCount}`;
+    header.appendChild(_countBadge);
 
     card.appendChild(header);
 
     // Collage grid
     const grid = document.createElement('div');
     const n = batchItems.length;
-    grid.className = `collage-grid collage-grid-${Math.min(n, 5)}`;
+    const _gameCols = viewMode === 'grid3' ? 3 : 2;
+    grid.className = isGameGrouped ? `collage-grid collage-grid-game collage-grid-game-${_gameCols}` : `collage-grid collage-grid-${Math.min(n, 5)}`;
     card.appendChild(grid);
 
     batchItems.forEach((item, idx) => {
@@ -684,7 +743,7 @@ function createCollageCard(batchItems) {
 
         const cell = document.createElement('div');
         cell.className = 'collage-cell';
-        if (n >= 4 && idx === 0) cell.className += ' collage-cell-hero';
+        if (!isGameGrouped && n >= 4 && idx === 0) cell.className += ' collage-cell-hero';
 
         const img = document.createElement('img');
         img.src = url;
@@ -717,8 +776,12 @@ function createCollageCard(batchItems) {
         // before the user clicks — eliminates the visible decode stall in the lightbox.
         cell.addEventListener('mouseenter', () => {
             if (_decodePromises.has(item.hdrUrl)) return; // already started
-            const img = new Image();
-            img.src = item.hdrUrl;
+            // Use a DOM-connected pool slot if the lightbox is open, otherwise a detached Image.
+            // Pool slots are kept in the document so their bitmaps won't be evicted.
+            const img = _lbDecodePool ? _poolPrefetch(item.hdrUrl) : (() => {
+                const i = new Image(); i.src = item.hdrUrl; return i;
+            })();
+            if (!img) return;
             const _pt = performance.now();
             const p = img.decode().then(() => {
                 console.log(`[lightbox] hover prefetch decode complete for "${item.name}"  +${(performance.now()-_pt).toFixed(1)}ms`);
@@ -726,30 +789,20 @@ function createCollageCard(batchItems) {
             _decodePromises.set(item.hdrUrl, p);
         });
 
-        cell.addEventListener('click', () => openLightbox(batchItems, idx));
+        cell.addEventListener('click', () => {
+            if (galleryViewMode === 'list') {
+                // In list mode, the filmstrip should show ALL visible images across every batch
+                const visibleItems = applyFilters(_allGalleryItems);
+                const globalIdx = visibleItems.findIndex(it => it.id === item.id);
+                openLightbox(visibleItems, Math.max(0, globalIdx));
+            } else {
+                openLightbox(batchItems, idx);
+            }
+        });
         grid.appendChild(cell);
     });
 
-    // ── HDR type label in header ──
-    const hdrTypeId = batchItems[0].hdrType;
-    const hdrTypeDef = HDR_TYPES.find(t => t.id === hdrTypeId);
-    let hdrLabel = null;
-    let hdrClass = '';
-    if (hdrTypeDef && hdrTypeId !== 'unknown') {
-        hdrLabel = hdrTypeDef.label;
-        hdrClass = `collage-hdr-type--${hdrTypeId}`;
-    } else if (!hdrTypeId) {
-        const tc = batchItems[0].metadata?.luminanceStats?.transferCharacteristic;
-        if (tc === 16 || tc === 18) { hdrLabel = 'Native HDR'; hdrClass = 'collage-hdr-type--nativeHdr'; }
-    }
-    if (hdrLabel) {
-        const hdrEl = document.createElement('span');
-        hdrEl.className = `collage-hdr-type ${hdrClass}`;
-        hdrEl.textContent = hdrLabel;
-        header.appendChild(hdrEl);
-    } else {
-        header.appendChild(document.createElement('div'));
-    }
+    header.appendChild(document.createElement('div'));
 
     return card;
 }
@@ -759,7 +812,8 @@ function createCollageCard(batchItems) {
 let lightboxOpen = false;
 let lightboxBatch = [];
 let lightboxIndex = 0;
-let lightboxPixelBuffer = null;
+// _lbOpenTime is set by openLightbox and read by _startPixelDecode for timing logs
+let _lbOpenTime = 0;
 let lightboxPixelBuffers = new Map(); // imageId → buffer promise
 let lightboxSdrActive = false;
 let lightboxSdrToggleActive = false; // full SDR view (no slider)
@@ -771,13 +825,22 @@ let _lightboxResetZoomIdleTimer = null;
 // can share the same in-flight promise rather than racing each other.
 const _decodePromises = new Map(); // hdrUrl → Promise<void>
 
+// DOM-connected decode pool — keeps decoded bitmaps alive in the browser's live
+// image cache so they can't be evicted before navigation.
+// Detached Image objects are evicted under memory pressure; elements that are
+// actually in the document are treated as "in use" and kept warm.
+// The pool is sized to the full batch so decoded images are never evicted mid-session.
+let _lbDecodePool = null;       // <div> appended to <body> while lightbox is open
+let _lbPoolSlots  = new Map();  // url → dedicated <img> element for that image
+const _prefetchedImages = new Map(); // url → pool <img> slot (dedup guard, mirrors _lbPoolSlots)
+
 // Lazily start pixel decode for a single item on demand.
 // Called when the analysis tool is enabled or when navigating while it's on.
 function _startPixelDecode(item) {
     if (lightboxPixelBuffers.has(item.id)) return;
     const entry = lightboxBlobUrls.get(item.id);
     if (!entry) return;
-    const _t0 = window._lbT0 || performance.now();
+    const _t0 = _lbOpenTime || performance.now();
     const p = new Promise(resolve => {
         console.log(`[lightbox] pixel worker: creating Worker  +${(performance.now()-_t0).toFixed(1)}ms`);
         const worker = new Worker('./pixel-worker.js', { type: 'module' });
@@ -805,16 +868,39 @@ function _startPixelDecode(item) {
     lightboxPixelBuffers.set(item.id, p);
 }
 
+// Assign a dedicated pool slot for a URL (one slot per URL, no eviction).
+// Returns the pool <img> element so callers can call .decode() on it.
+function _poolPrefetch(url) {
+    if (_lbPoolSlots.has(url)) return _lbPoolSlots.get(url); // already has a slot
+    if (!_lbDecodePool) return null; // pool not open yet
+    const img = document.createElement('img');
+    img.src = url;
+    _lbDecodePool.appendChild(img);
+    _lbPoolSlots.set(url, img);
+    _prefetchedImages.set(url, img); // keep _prefetchedImages in sync for legacy references
+    return img;
+}
+
 function openLightbox(batchItems, startIndex) {
     if (lightboxOpen) closeLightbox();
 
     const _lbT0 = performance.now();
+    _lbOpenTime = _lbT0;
     console.log(`[lightbox] openLightbox() called  +0ms`);
 
     lightboxOpen = true;
     lightboxBatch = batchItems;
     lightboxIndex = startIndex;
     lightboxSdrActive = false;
+
+    // Create a DOM-connected decode pool sized to the full batch.
+    // Each image that gets decoded gets its own permanent <img> slot so the browser
+    // can never evict its bitmap mid-session. Slots are added lazily by _poolPrefetch.
+    _lbDecodePool = document.createElement('div');
+    _lbDecodePool.style.cssText = 'position:fixed;width:1px;height:1px;overflow:hidden;opacity:0;pointer-events:none;z-index:-1;';
+    _lbPoolSlots.clear();
+    _prefetchedImages.clear();
+    document.body.appendChild(_lbDecodePool);
 
     // Pre-create blob URLs for all images in the batch — reused on every navigation, no re-creation
     lightboxBlobUrls = new Map();
@@ -824,6 +910,35 @@ function openLightbox(batchItems, startIndex) {
         const displayUrl = item.thumbUrl || item.hdrUrl;
         const sdrUrl     = item.sdrUrl   || null;
         lightboxBlobUrls.set(item.id, { url: displayUrl, fullUrl, blob: null, sdrUrl });
+    });
+
+    // Prefetch SDR images for the opening item and its neighbours so that
+    // clicking the SDR slider / toggle shows the image instantly.
+    _sdrPreloadCache.clear();
+    _prefetchSdrImages(startIndex);
+
+    // Eagerly decode the entire batch into the DOM pool.    // At ~1MB per AVIF image this is cheap on the network; decoded bitmaps are held
+    // by their pool slots and never evicted mid-session.
+    // Priority: opened image first, then outward alternating, then the rest.
+    const _eagerOrder = [startIndex];
+    for (let d = 1; d < lightboxBatch.length; d++) {
+        if (startIndex + d < lightboxBatch.length) _eagerOrder.push(startIndex + d);
+        if (startIndex - d >= 0)                   _eagerOrder.push(startIndex - d);
+    }
+    _eagerOrder.forEach((i, slot) => {
+        const entry = lightboxBlobUrls.get(lightboxBatch[i]?.id);
+        if (!entry?.fullUrl) return;
+        // Stagger by 60ms per slot — current image gets a head start, rest trickle in
+        // without saturating the codec thread or competing with the first paint.
+        setTimeout(() => {
+            const poolImg = _poolPrefetch(entry.fullUrl);
+            if (!poolImg || _decodePromises.has(entry.fullUrl)) return;
+            const _pt = performance.now();
+            const promise = poolImg.decode().then(() => {
+                console.log(`[lightbox] eager batch decode done: "${lightboxBatch[i].name}" (slot ${slot})  +${(performance.now()-_pt).toFixed(1)}ms`);
+            }).catch(() => {});
+            _decodePromises.set(entry.fullUrl, promise);
+        }, slot * 60);
     });
 
     // Build overlay
@@ -875,10 +990,7 @@ function openLightbox(batchItems, startIndex) {
             if (e.clientX < first.left || e.clientX > last.right) closeLightbox();
         }
 
-        // Toolbar: close when clicking the empty left/center areas, not the buttons
-        if (e.target === toolbar || e.target === toolbarLeft || e.target === toolbarRight) {
-            closeLightbox();
-        }
+        // Toolbar: clicking empty areas does nothing (only explicit close button closes)
     });
 
     // ── Main image area ──
@@ -900,7 +1012,30 @@ function openLightbox(batchItems, startIndex) {
 
     const imageHeaderTitle = document.createElement('div');
     imageHeaderTitle.className = 'lightbox-image-header-title';
-    imageHeaderTitle.textContent = lightboxBatch[startIndex].gameName || 'Unknown Game';
+
+    // Helper — updates title text and link state whenever the image changes.
+    function _setLightboxTitle(gameName) {
+        const name = gameName || 'Unknown Game';
+        imageHeaderTitle.textContent = name;
+        if (gameName) {
+            imageHeaderTitle.classList.add('lightbox-image-header-title--link');
+            imageHeaderTitle.onclick = () => {
+                closeLightbox();
+                gameSearchQuery = gameName;
+                const input    = document.getElementById('gallerySearchInput');
+                const clearBtn = document.getElementById('gallerySearchClear');
+                if (input)    input.value = gameName;
+                if (clearBtn) clearBtn.style.display = 'flex';
+                renderGallery(_allGalleryItems);
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+            };
+        } else {
+            imageHeaderTitle.classList.remove('lightbox-image-header-title--link');
+            imageHeaderTitle.onclick = null;
+        }
+    }
+
+    _setLightboxTitle(lightboxBatch[startIndex].gameName);
 
     const imageHeaderSubtitle = document.createElement('div');
     imageHeaderSubtitle.className = 'lightbox-image-header-subtitle';
@@ -949,8 +1084,8 @@ function openLightbox(batchItems, startIndex) {
     // ── Copy Link button (right side) ──
     const copyLinkBtn = document.createElement('button');
     copyLinkBtn.className = 'button-secondary lightbox-copy-link-btn';
-    copyLinkBtn.title = 'Copy link to this image';
     copyLinkBtn.title = 'Copy link';
+    copyLinkBtn.dataset.tooltip = 'Copy Link';
     copyLinkBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg><span class="btn-label"> Copy Link</span>';
     copyLinkBtn.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -982,6 +1117,29 @@ function openLightbox(batchItems, startIndex) {
     const filmstrip = document.createElement('div');
     filmstrip.className = 'lightbox-filmstrip';
     overlay.appendChild(filmstrip);
+
+    // ── Filmstrip mousewheel horizontal scroll (smooth) ──
+    let _fsTarget = 0;
+    let _fsRaf = null;
+
+    function _fsAnimateLerp() {
+        const diff = _fsTarget - filmstrip.scrollLeft;
+        if (Math.abs(diff) < 0.5) {
+            filmstrip.scrollLeft = _fsTarget;
+            _fsRaf = null;
+            return;
+        }
+        filmstrip.scrollLeft += diff * 0.18;
+        _fsRaf = requestAnimationFrame(_fsAnimateLerp);
+    }
+
+    filmstrip.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        const delta = e.deltaY !== 0 ? e.deltaY : e.deltaX;
+        const maxScroll = filmstrip.scrollWidth - filmstrip.clientWidth;
+        _fsTarget = Math.max(0, Math.min(maxScroll, _fsTarget + delta));
+        if (!_fsRaf) _fsRaf = requestAnimationFrame(_fsAnimateLerp);
+    }, { passive: false });
 
     // ── Nav arrows ──
     const prevBtn = document.createElement('button');
@@ -1021,52 +1179,60 @@ function openLightbox(batchItems, startIndex) {
         ? '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg><span class="btn-label"> <u>A</u>nalysis Tool</span>'
         : '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" opacity="0.3"></path><circle cx="12" cy="12" r="3"></circle></svg><span class="btn-label"> <u>A</u>nalysis Tool</span>';
     detailsBtn.title = 'Analysis Tool (A)';
+    detailsBtn.dataset.tooltip = 'Analysis Tool (A)';
     detailsBtn.onclick = () => toggleGlobalDetailsMode();
     toolbarLeft.appendChild(detailsBtn);
+
+    const sep0 = document.createElement('div');
+    sep0.className = 'toolbar-separator';
+    toolbarLeft.appendChild(sep0);
 
     const compareBtn = document.createElement('button');
     compareBtn.className = 'button-secondary';
     compareBtn.title = 'SDR Slider (S)';
-    compareBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 6H3"/><path d="m7 12-4-4 4-4"/><path d="M3 18h18"/><path d="m17 12 4 4-4 4"/></svg><span class="btn-label"> <u>S</u>DR Slider</span>';
+    compareBtn.dataset.tooltip = 'SDR Slider (S)';
+    compareBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12H3"/><path d="m7 8-4 4 4 4"/><path d="m17 8 4 4-4 4"/></svg><span class="btn-label"> <u>S</u>DR Slider</span>';
     toolbarLeft.appendChild(compareBtn);
 
-    const sdrToggleBtn = document.createElement('button');
-    sdrToggleBtn.className = 'button-secondary';
-    sdrToggleBtn.title = 'SDR Toggle';
-    sdrToggleBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg><span class="btn-label"> SDR Toggle</span>';
+    const sdrToggleBtn = document.createElement('div');
+    sdrToggleBtn.className = 'sdr-pill-toggle';
+    sdrToggleBtn.title = 'SDR Toggle (D)';
+    sdrToggleBtn.dataset.tooltip = 'SDR Toggle (D)';
+    sdrToggleBtn.innerHTML = '<span class="sdr-pill-seg" data-seg="sdr">SDR</span><span class="sdr-pill-seg sdr-pill-seg--active" data-seg="hdr">HDR</span>';
     toolbarLeft.appendChild(sdrToggleBtn);
 
-    const saveBtn = document.createElement('button');
-    saveBtn.className = 'button-secondary';
-    saveBtn.title = 'Save image';
-    saveBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg><span class="btn-label"> Save HDR Image</span>';
+    const sep1 = document.createElement('div');
+    sep1.className = 'toolbar-separator';
+    toolbarLeft.appendChild(sep1);
 
-    function updateSaveBtn() {
-        const isSdr = lightboxSdrToggleActive;
-        saveBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg><span class="btn-label"> Save ${isSdr ? 'SDR' : 'HDR'} Image</span>`;
-    }
-    toolbarLeft.appendChild(saveBtn);
 
-    // ── RIGHT side: Edit, Delete, Delete All, Copy Link (already appended above) ──
+    // ── RIGHT side: Edit, Copy Link | separator | Delete, Delete All ──
     const editBtn = document.createElement('button');
     editBtn.className = 'button-secondary';
     editBtn.title = 'Edit details';
+    editBtn.dataset.tooltip = 'Edit';
     editBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg><span class="btn-label"> Edit</span>';
     toolbarRight.insertBefore(editBtn, copyLinkBtn);
+
+    const sep2 = document.createElement('div');
+    sep2.className = 'toolbar-separator';
+    toolbarRight.appendChild(sep2);
 
     const deleteBtn = document.createElement('button');
     deleteBtn.className = 'button-danger';
     deleteBtn.title = 'Delete image';
+    deleteBtn.dataset.tooltip = 'Delete';
     deleteBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg><span class="btn-label"> Delete</span>';
-    toolbarRight.insertBefore(deleteBtn, copyLinkBtn);
+    toolbarRight.appendChild(deleteBtn);
 
     const deleteAllBtn = document.createElement('button');
     deleteAllBtn.className = 'button-danger';
     deleteAllBtn.title = 'Delete all in batch';
+    deleteAllBtn.dataset.tooltip = 'Delete All';
     deleteAllBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg><span class="btn-label"> Delete All</span>';
     // Only show if batch has more than one image
     deleteAllBtn.style.display = lightboxBatch.length > 1 ? '' : 'none';
-    toolbarRight.insertBefore(deleteAllBtn, copyLinkBtn);
+    toolbarRight.appendChild(deleteAllBtn);
 
     // ── Hold-to-zoom ──
     let isZooming = false;
@@ -1118,7 +1284,11 @@ function openLightbox(batchItems, startIndex) {
     function _getFitRect() {
         const natW = imgEl.naturalWidth  || 1;
         const natH = imgEl.naturalHeight || 1;
-        const vw = window.innerWidth, vh = window.innerHeight;
+        // Use clientWidth/clientHeight (excludes scrollbars and mobile browser chrome)
+        // rather than window.innerWidth/Height which can include hidden chrome area,
+        // causing the 1× fit rect to be taller than the actual visible viewport.
+        const vw = document.documentElement.clientWidth;
+        const vh = document.documentElement.clientHeight;
         const s  = Math.min(vw / natW, vh / natH);
         const fw = natW * s, fh = natH * s;
         return { left: (vw - fw) / 2, top: (vh - fh) / 2, width: fw, height: fh };
@@ -1299,6 +1469,13 @@ function openLightbox(batchItems, startIndex) {
         isZooming = true;
         currentZoomScale = 1;
         zoomCursorX = e.clientX; zoomCursorY = e.clientY;
+        // Reset scroll-zoom state — ensures 1× lands centered with no stale pan offsets,
+        // matching the clean state that wheel-entry sets explicitly before entering.
+        scrollZoomCurrent = 1;
+        zoomTx = 0; zoomTy = 0;
+        if (scrollZoomRaf)  { cancelAnimationFrame(scrollZoomRaf);  scrollZoomRaf  = null; }
+        if (panMomentumRaf) { cancelAnimationFrame(panMomentumRaf); panMomentumRaf = null; }
+        scrollZoomVelocity = 0;
 
         // Capture natural rect, switch to fixed, apply FLIP inverse instantly
         naturalRect = imgEl.getBoundingClientRect();
@@ -1311,11 +1488,18 @@ function openLightbox(batchItems, startIndex) {
         zoomTooltip.innerHTML = `<svg class="zoom-icon" xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>1.0× zoom`;
         if (lbMouseInside) zoomTooltip.style.display = 'block';
 
-        // Next frame: animate to scale(1) anchored at cursor
+        // Animate to 1× centered — translate(0,0) scale(1) is identical to the wheel-entry
+        // target and guarantees the image fits inside the visible viewport at every screen size.
+        // Double-rAF: first frame commits the FLIP inverse, second starts the transition.
         requestAnimationFrame(() => {
-            imgEl.style.transition = `transform ${CONFIG.zoomInMs}ms cubic-bezier(0.2, 0, 0, 1)`;
-            const ox = e.clientX, oy = e.clientY;
-            imgEl.style.transform = `translate(${ox - ox * currentZoomScale}px,${oy - oy * currentZoomScale}px) scale(${currentZoomScale})`;
+            requestAnimationFrame(() => {
+                imgEl.style.transition = `transform 180ms cubic-bezier(0.2, 0, 0, 1)`;
+                imgEl.style.transform = 'translate(0px,0px) scale(1)';
+                setTimeout(() => {
+                    imgEl.style.transition = 'none';
+                    startScrollZoomRaf();
+                }, 190);
+            });
         });
         e.preventDefault();
     });
@@ -1565,13 +1749,175 @@ function openLightbox(batchItems, startIndex) {
         });
     });
 
+    // ── Touch: swipe navigation, pinch-to-zoom, single-finger pan ──────────────
+    let _touchStartX = 0, _touchStartY = 0, _touchStartTime = 0;
+    let _touchNavActive = false, _touchNavDirLocked = false, _touchNavDx = 0;
+    let _touchPinchActive = false, _touchPinchStartDist = 0, _touchPinchStartScale = 1;
+    let _touchPanActive = false;
+
+    const _t2Dist = (a, b) => Math.hypot(b.clientX - a.clientX, b.clientY - a.clientY);
+    const _t2Mid  = (a, b) => ({ x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2 });
+
+    imageArea.addEventListener('touchstart', (e) => {
+        // Don't interfere with SDR slider drag or metadata panel drag
+        if (e.target.closest('.inline-comparison-slider') || e.target.closest('.imo-panel')) return;
+
+        const tt = e.touches;
+        if (tt.length === 2) {
+            _touchPinchActive     = true;
+            _touchNavActive       = false;
+            _touchPanActive       = false;
+            isPanning             = false;
+            _touchPinchStartDist  = _t2Dist(tt[0], tt[1]);
+            _touchPinchStartScale = scrollZoomCurrent > 1 ? scrollZoomCurrent : 1;
+            if (panMomentumRaf) { cancelAnimationFrame(panMomentumRaf); panMomentumRaf = null; }
+            if (scrollZoomRaf)  { cancelAnimationFrame(scrollZoomRaf);  scrollZoomRaf  = null; }
+            scrollZoomVelocity = 0;
+            // Enter zoom mode if not already active
+            if (!imgEl.classList.contains('lightbox-image-zooming')) {
+                naturalRect = imgEl.getBoundingClientRect();
+                scrollZoomCurrent = 1; zoomTx = 0; zoomTy = 0;
+                _touchPinchStartScale = 1;
+                imgEl.classList.add('lightbox-image-zooming');
+                imgEl.style.transition      = 'none';
+                imgEl.style.transformOrigin = '0 0';
+                imgEl.style.transform       = 'translate(0px,0px) scale(1)';
+            }
+            e.preventDefault();
+            return;
+        }
+        if (tt.length === 1) {
+            const t = tt[0];
+            _touchStartX       = t.clientX;
+            _touchStartY       = t.clientY;
+            _touchStartTime    = Date.now();
+            _touchNavActive    = false;
+            _touchNavDirLocked = false;
+            _touchNavDx        = 0;
+            _touchPanActive    = false;
+
+            if (imgEl.classList.contains('lightbox-image-zooming') && scrollZoomCurrent > 1) {
+                // Single-finger pan while zoomed
+                _touchPanActive = true;
+                isPanning       = true;
+                panStartX = t.clientX; panStartY = t.clientY;
+                panStartTx = zoomTx;   panStartTy = zoomTy;
+                panVelX = 0; panVelY = 0;
+                panLastX = t.clientX; panLastY = t.clientY; panLastTime = performance.now();
+                if (panMomentumRaf) { cancelAnimationFrame(panMomentumRaf); panMomentumRaf = null; }
+                if (scrollZoomRaf)  { cancelAnimationFrame(scrollZoomRaf);  scrollZoomRaf  = null; }
+                scrollZoomVelocity = 0;
+                e.preventDefault();
+            } else {
+                // Potential horizontal swipe for image navigation
+                _touchNavActive = true;
+            }
+        }
+    }, { passive: false });
+
+    imageArea.addEventListener('touchmove', (e) => {
+        const tt = e.touches;
+        if (_touchPinchActive && tt.length === 2) {
+            const newDist  = _t2Dist(tt[0], tt[1]);
+            const mid      = _t2Mid(tt[0], tt[1]);
+            const newScale = Math.max(1, Math.min(10, _touchPinchStartScale * (newDist / _touchPinchStartDist)));
+            const oldScale = scrollZoomCurrent;
+            scrollZoomCurrent = newScale;
+            anchorZoomAtCursor(mid.x, mid.y, oldScale);
+            imgEl.style.transition = 'none';
+            applyTransform();
+            e.preventDefault();
+            return;
+        }
+        if (tt.length !== 1) return;
+        const t  = tt[0];
+        const dx = t.clientX - _touchStartX;
+        const dy = t.clientY - _touchStartY;
+
+        if (_touchPanActive) {
+            zoomTx = panStartTx + (t.clientX - panStartX);
+            zoomTy = panStartTy + (t.clientY - panStartY);
+            imgEl.style.transition = 'none';
+            applyTransform();
+            const now = performance.now(), _dt = now - panLastTime;
+            if (_dt > 0 && _dt < 64) { panVelX = (t.clientX - panLastX) / _dt; panVelY = (t.clientY - panLastY) / _dt; }
+            panLastX = t.clientX; panLastY = t.clientY; panLastTime = now;
+            e.preventDefault();
+            return;
+        }
+        if (_touchNavActive) {
+            if (!_touchNavDirLocked && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) {
+                _touchNavDirLocked = Math.abs(dx) >= Math.abs(dy);
+                if (!_touchNavDirLocked) { _touchNavActive = false; return; } // vertical — hand off
+            }
+            if (_touchNavDirLocked) { _touchNavDx = dx; e.preventDefault(); }
+        }
+    }, { passive: false });
+
+    imageArea.addEventListener('touchend', (e) => {
+        if (_touchPinchActive) {
+            _touchPinchActive = false;
+            _touchPanActive   = false;
+            isPanning         = false;
+            if (scrollZoomCurrent <= 1.05) startZoomExit();
+            return;
+        }
+        if (_touchPanActive) {
+            _touchPanActive = false;
+            isPanning       = false;
+            const ct   = e.changedTouches[0];
+            const dist = Math.hypot(ct.clientX - panStartX, ct.clientY - panStartY);
+            if (dist < 8) startZoomExit(); // tap while zoomed → exit
+            else          startPanMomentum();
+            return;
+        }
+        if (_touchNavActive) {
+            _touchNavActive    = false;
+            _touchNavDirLocked = false;
+            if (Math.abs(_touchNavDx) > 50) {
+                if (_touchNavDx < 0) navigateLightbox(1);  // swipe left  → next
+                else                  navigateLightbox(-1); // swipe right → prev
+                e.preventDefault();
+            }
+            _touchNavDx = 0;
+        }
+    }, { passive: false });
+
+    // ── Orientation / resize: reset zoom & reposition slider ─────────────────
+    function _onLightboxResize() {
+        if (imgEl.classList.contains('lightbox-image-zooming')) {
+            if (scrollZoomRaf)  { cancelAnimationFrame(scrollZoomRaf);  scrollZoomRaf  = null; }
+            if (panMomentumRaf) { cancelAnimationFrame(panMomentumRaf); panMomentumRaf = null; }
+            scrollZoomCurrent = 1; scrollZoomVelocity = 0;
+            zoomTx = 0; zoomTy = 0; naturalRect = null;
+            isPanning = false; _touchPanActive = false; _touchPinchActive = false;
+            imgEl.classList.remove('lightbox-image-zooming');
+            imgEl.style.transform = ''; imgEl.style.transformOrigin = ''; imgEl.style.transition = '';
+            zoomTooltip.style.display = 'none';
+            _clearZoomIdleTimer();
+        }
+        // Reposition the SDR comparison slider if it is open
+        const _slider = imageWrapper.querySelector('.inline-comparison-slider');
+        if (_slider?._reposition) requestAnimationFrame(_slider._reposition);
+        // Keep active filmstrip thumbnail visible
+        requestAnimationFrame(() => {
+            const _ft = filmstrip.querySelector('.lightbox-filmstrip-thumb-active');
+            if (_ft) _ft.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'instant' });
+        });
+    }
+
     // ── Render function (called on init and navigation) ──
     async function renderLightboxImage() {
         const item = lightboxBatch[lightboxIndex];
         // Update the page URL so this image has a shareable link
         const _shareUrl = new URL(location.href);
-        _shareUrl.search = '';
         _shareUrl.searchParams.set('img', item.id);
+        // Preserve ?game= if a gallery filter is active
+        if (gameSearchQuery.trim()) {
+            _shareUrl.searchParams.set('game', gameSearchQuery.trim());
+        } else {
+            _shareUrl.searchParams.delete('game');
+        }
         history.replaceState(null, '', _shareUrl.toString());
         const _t0 = performance.now();
         console.log(`[lightbox] renderLightboxImage() start  +0ms`);
@@ -1600,12 +1946,13 @@ function openLightbox(batchItems, startIndex) {
         }
         lightboxSdrActive = false;
         compareBtn.classList.remove('button-active');
-        compareBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 6H3"/><path d="m7 12-4-4 4-4"/><path d="M3 18h18"/><path d="m17 12 4 4-4 4"/></svg><span class="btn-label"> <u>S</u>DR Slider</span>';
+        compareBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12H3"/><path d="m7 8-4 4 4 4"/><path d="m17 8 4 4-4 4"/></svg><span class="btn-label"> <u>S</u>DR Slider</span>';
 
         // Reset SDR full-view toggle
         lightboxSdrToggleActive = false;
-        sdrToggleBtn.classList.remove('button-active');
-        updateSaveBtn();
+        sdrToggleBtn.classList.remove('sdr-active');
+        sdrToggleBtn.querySelectorAll('.sdr-pill-seg').forEach(seg => seg.classList.toggle('sdr-pill-seg--active', seg.dataset.seg === 'hdr'));
+        // updateSaveBtn();
 
         // Remove existing details overlay
         const existingOverlay = imageWrapper.querySelector('.image-meta-overlay');
@@ -1613,10 +1960,16 @@ function openLightbox(batchItems, startIndex) {
 
         // Update main image — always use full-res original for accurate HDR rendering
         const { url: displayUrl, fullUrl, blob } = lightboxBlobUrls.get(item.id);
-        console.log(`[lightbox] setting imgEl.src  +${(performance.now()-_t0).toFixed(1)}ms`);
-        imgEl.onerror = () => console.warn(`[lightbox] imgEl onerror fired  +${(performance.now()-_t0).toFixed(1)}ms`);
-        imgEl.src = fullUrl;
-        imgEl.onload = () => console.log(`[lightbox] imgEl onload fired  +${(performance.now()-_t0).toFixed(1)}ms`);
+        // Only reassign src if the URL actually changed — skipping it avoids a blank
+        // flash when the bitmap is already painted (e.g. navigating back to a cached image).
+        if (imgEl.src !== fullUrl) {
+            console.log(`[lightbox] setting imgEl.src  +${(performance.now()-_t0).toFixed(1)}ms`);
+            imgEl.onerror = () => console.warn(`[lightbox] imgEl onerror fired  +${(performance.now()-_t0).toFixed(1)}ms`);
+            imgEl.onload = () => { imgEl.onload = null; console.log(`[lightbox] imgEl onload fired  +${(performance.now()-_t0).toFixed(1)}ms`); };
+            imgEl.src = fullUrl;
+        } else {
+            console.log(`[lightbox] imgEl.src unchanged, skipping reassign  +${(performance.now()-_t0).toFixed(1)}ms`);
+        }
         // Reuse in-flight hover prefetch promise if available, otherwise start fresh.
         const _existingDecode = _decodePromises.get(fullUrl);
         if (_existingDecode) {
@@ -1631,7 +1984,7 @@ function openLightbox(batchItems, startIndex) {
         }
 
         // Register in imageWrappers for global details system
-        imageWrappers.set(item.id, { wrapper: imageWrapper, metadata: item.metadata || null, imageItem: item, compareButton: compareBtn });
+        imageWrappers.set(item.id, { wrapper: imageWrapper, metadata: item.metadata || null, imageItem: item, compareButton: compareBtn, sdrToggle: sdrToggleBtn });
         currentVisibleImage = item.id;
 
         // Update cursor
@@ -1649,7 +2002,7 @@ function openLightbox(batchItems, startIndex) {
         // Update image header tags and title
         imageHeaderTags.innerHTML = '';
         imageHeaderRight.innerHTML = '';
-        imageHeaderTitle.textContent = item.gameName || 'Unknown Game';
+        _setLightboxTitle(item.gameName);
         const _navAdditionalInfo = item.additionalInfo || '';
         imageHeaderSubtitle.textContent = _navAdditionalInfo;
         imageHeaderSubtitle.style.display = _navAdditionalInfo ? '' : 'none';
@@ -1674,12 +2027,29 @@ function openLightbox(batchItems, startIndex) {
         filmstrip.querySelectorAll('.lightbox-filmstrip-thumb').forEach((thumb, i) => {
             thumb.classList.toggle('lightbox-filmstrip-thumb-active', i === lightboxIndex);
         });
+        // Scroll active thumbnail into view (touch / keyboard navigation)
+        requestAnimationFrame(() => {
+            const _activeThumb = filmstrip.querySelector('.lightbox-filmstrip-thumb-active');
+            if (_activeThumb) _activeThumb.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'smooth' });
+        });
 
         // Nav arrow visibility
         prevBtn.style.opacity = lightboxIndex === 0 ? '0.25' : '1';
         prevBtn.style.pointerEvents = lightboxIndex === 0 ? 'none' : '';
         nextBtn.style.opacity = lightboxIndex === lightboxBatch.length - 1 ? '0.25' : '1';
         nextBtn.style.pointerEvents = lightboxIndex === lightboxBatch.length - 1 ? 'none' : '';
+
+        // Show/hide owner-only buttons based on whether the current user uploaded this image
+        editBtn.style.display       = 'none';
+        sep2.style.display          = 'none';
+        deleteBtn.style.display     = 'none';
+        deleteAllBtn.style.display  = 'none';
+        isCurrentUserOwner(item).then(isOwner => {
+            editBtn.style.display      = isOwner ? '' : 'none';
+            sep2.style.display         = isOwner ? '' : 'none';
+            deleteBtn.style.display    = isOwner ? '' : 'none';
+            deleteAllBtn.style.display = isOwner && lightboxBatch.length > 1 ? '' : 'none';
+        });
 
         // Start pixel decode only if analysis tool is active
         if (globalDetailsEnabled) _startPixelDecode(item);
@@ -1702,66 +2072,8 @@ function openLightbox(batchItems, startIndex) {
             });
         }
 
-        // Pre-decode adjacent images outward from current index so navigation feels instant.
-        // Works outward (next, prev, next+1, prev-1…) with a staggered delay so we don't
-        // saturate the GPU decoder all at once. Capped at 6 neighbours total.
-        const _adjOrder = [];
-        for (let d = 1; d <= 3; d++) {
-            if (lightboxIndex + d < lightboxBatch.length) _adjOrder.push(lightboxIndex + d);
-            if (lightboxIndex - d >= 0)                   _adjOrder.push(lightboxIndex - d);
-        }
-        _adjOrder.slice(0, 6).forEach((i, slot) => {
-            const adj = lightboxBatch[i];
-            if (!adj) return;
-            const adjEntry = lightboxBlobUrls.get(adj.id);
-            if (!adjEntry) return;
-            if (_decodePromises.has(adjEntry.fullUrl)) return; // already decoded or in flight
-            setTimeout(() => {
-                const p = new Image();
-                p.src = adjEntry.fullUrl;
-                const _pt = performance.now();
-                const promise = p.decode().then(() => {
-                    console.log(`[lightbox] adj prefetch decode done: "${adj.name}" (slot ${slot+1})  +${(performance.now()-_pt).toFixed(1)}ms`);
-                }).catch(() => {});
-                _decodePromises.set(adjEntry.fullUrl, promise);
-            }, slot * 150); // stagger by 150 ms per slot
-        });
 
         // Wire up action buttons for current item
-        saveBtn.onclick = async () => {
-            try {
-                const isSdr = lightboxSdrToggleActive;
-                const { sdrUrl, fullUrl } = lightboxBlobUrls.get(item.id);
-                const saveUrl = isSdr && sdrUrl ? sdrUrl : fullUrl;
-                const dotIdx = item.name.lastIndexOf('.');
-                const base = dotIdx >= 0 ? item.name.slice(0, dotIdx) : item.name;
-                const ext  = dotIdx >= 0 ? item.name.slice(dotIdx).toLowerCase() : '';
-                const suffix = isSdr ? '_SDR' : '_HDR';
-                const saveExt = isSdr ? '.png' : ext;
-                const saveName = base + suffix + saveExt;
-                if (window.showSaveFilePicker) {
-                    const EXT_TYPES = {
-                        '.png':  [{ description: 'PNG Image',            accept: { 'image/png':  ['.png']  } }],
-                        '.avif': [{ description: 'AVIF Image',           accept: { 'image/avif': ['.avif'] } }],
-                        '.jxr':  [{ description: 'JPEG XR Image',        accept: { 'image/jxr':  ['.jxr']  } }],
-                        '.exr':  [{ description: 'OpenEXR Image',        accept: { 'image/x-exr': ['.exr'] } }],
-                        '.hdr':  [{ description: 'Radiance HDR Image',   accept: { 'image/vnd.radiance': ['.hdr'] } }],
-                    };
-                    const types = EXT_TYPES[saveExt];
-                    const fh = await window.showSaveFilePicker({ suggestedName: saveName, ...(types ? { types, excludeAcceptAllOption: true } : {}) });
-                    const saveResp = await fetch(saveUrl);
-                    const saveBlob = await saveResp.blob();
-                    const w = await fh.createWritable();
-                    await w.write(saveBlob);
-                    await w.close();
-                } else {
-                    downloadFile(saveUrl, saveName);
-                }
-            } catch (err) {
-                if (err.name !== 'AbortError') console.error('Save error:', err);
-            }
-        };
-
         editBtn.onclick = async () => {
             if (editBtn.disabled) return;
             editBtn.disabled = true;
@@ -1781,7 +2093,7 @@ function openLightbox(batchItems, startIndex) {
                 }
             });
             // Also update the toolbar center title which is set once on open
-            imageHeaderTitle.textContent = newGameName || 'Unknown Game';
+            _setLightboxTitle(newGameName);
             const _editAdditionalInfo = newAdditionalInfo || '';
             imageHeaderSubtitle.textContent = _editAdditionalInfo;
             imageHeaderSubtitle.style.display = _editAdditionalInfo ? '' : 'none';
@@ -1799,14 +2111,6 @@ function openLightbox(batchItems, startIndex) {
             if (!confirm(`Delete "${item.name}"?`)) return;
             try {
                 await deleteImageFile(item.id);
-                // Revoke and clean up this item's lightbox URLs before splicing
-                const entry = lightboxBlobUrls.get(item.id);
-                if (entry) {
-                    URL.revokeObjectURL(entry.fullUrl);
-                    if (entry.url !== entry.fullUrl) URL.revokeObjectURL(entry.url);
-                    lightboxCreatedUrls = lightboxCreatedUrls.filter(u => u !== entry.fullUrl && u !== entry.url);
-                    lightboxBlobUrls.delete(item.id);
-                }
                 lightboxPixelBuffers.delete(item.id);
                 lightboxBatch.splice(lightboxIndex, 1);
                 if (lightboxBatch.length === 0) {
@@ -1828,17 +2132,7 @@ function openLightbox(batchItems, startIndex) {
             try {
                 const ids = lightboxBatch.map(b => b.id);
                 await deleteBatchImageFiles(ids);
-                // Revoke all lightbox URLs for the batch
-                ids.forEach(id => {
-                    const entry = lightboxBlobUrls.get(id);
-                    if (entry) {
-                        URL.revokeObjectURL(entry.fullUrl);
-                        if (entry.url !== entry.fullUrl) URL.revokeObjectURL(entry.url);
-                        lightboxCreatedUrls = lightboxCreatedUrls.filter(u => u !== entry.fullUrl && u !== entry.url);
-                        lightboxBlobUrls.delete(id);
-                    }
-                    lightboxPixelBuffers.delete(id);
-                });
+                ids.forEach(id => { lightboxPixelBuffers.delete(id); });
                 closeLightbox();
                 await refreshGallery();
             } catch (err) { console.error('Delete all error:', err); }
@@ -1861,7 +2155,8 @@ function openLightbox(batchItems, startIndex) {
                 const { fullUrl } = lightboxBlobUrls.get(item.id);
                 imgEl.src = fullUrl;
                 lightboxSdrToggleActive = false;
-                sdrToggleBtn.classList.remove('button-active');
+                sdrToggleBtn.classList.remove('sdr-active');
+                sdrToggleBtn.querySelectorAll('.sdr-pill-seg').forEach(seg => seg.classList.toggle('sdr-pill-seg--active', seg.dataset.seg === 'hdr'));
             }
 
             const existingSlider = imageWrapper.querySelector('.inline-comparison-slider');
@@ -1870,7 +2165,7 @@ function openLightbox(batchItems, startIndex) {
                 existingSlider.remove();
                 lightboxSdrActive = false;
                 compareBtn.classList.remove('button-active');
-                compareBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 6H3"/><path d="m7 12-4-4 4-4"/><path d="M3 18h18"/><path d="m17 12 4 4-4 4"/></svg><span class="btn-label"> <u>S</u>DR Slider</span>';
+                compareBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12H3"/><path d="m7 8-4 4 4 4"/><path d="m17 8 4 4-4 4"/></svg><span class="btn-label"> <u>S</u>DR Slider</span>';
                 // Restore analysis overlay and nit tooltip
                 const metaOverlay = imageWrapper.querySelector('.image-meta-overlay');
                 if (metaOverlay) metaOverlay.style.visibility = '';
@@ -1941,6 +2236,7 @@ function openLightbox(batchItems, startIndex) {
                     }
                 }
 
+                slider._reposition = positionSlider; // expose for resize handler
                 imgContainer.appendChild(slider);
 
                 // Re-position whenever zoom mode is toggled (class change on imgEl)
@@ -2028,6 +2324,14 @@ function openLightbox(batchItems, startIndex) {
             }
         };
 
+        // Helper: update pill toggle visual state (sdrActive=true → SDR seg lit, false → HDR seg lit)
+        function _setSdrPill(sdrActive) {
+            sdrToggleBtn.classList.toggle('sdr-active', sdrActive);
+            sdrToggleBtn.querySelectorAll('.sdr-pill-seg').forEach(seg => {
+                seg.classList.toggle('sdr-pill-seg--active', sdrActive ? seg.dataset.seg === 'sdr' : seg.dataset.seg === 'hdr');
+            });
+        }
+
         sdrToggleBtn.onclick = () => {
             // Close the slider if it's open — the two modes are mutually exclusive
             const existingSlider = imageWrapper.querySelector('.inline-comparison-slider');
@@ -2036,7 +2340,7 @@ function openLightbox(batchItems, startIndex) {
                 existingSlider.remove();
                 lightboxSdrActive = false;
                 compareBtn.classList.remove('button-active');
-                compareBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 6H3"/><path d="m7 12-4-4 4-4"/><path d="M3 18h18"/><path d="m17 12 4 4-4 4"/></svg><span class="btn-label"> <u>S</u>DR Slider</span>';
+                compareBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12H3"/><path d="m7 8-4 4 4 4"/><path d="m17 8 4 4-4 4"/></svg><span class="btn-label"> <u>S</u>DR Slider</span>';
             }
 
             if (lightboxSdrToggleActive) {
@@ -2044,8 +2348,8 @@ function openLightbox(batchItems, startIndex) {
                 const { fullUrl } = lightboxBlobUrls.get(item.id);
                 imgEl.src = fullUrl;
                 lightboxSdrToggleActive = false;
-                sdrToggleBtn.classList.remove('button-active');
-                updateSaveBtn();
+                _setSdrPill(false);
+                // updateSaveBtn();
                 const metaOverlay = imageWrapper.querySelector('.image-meta-overlay');
                 if (metaOverlay) metaOverlay.style.visibility = '';
                 return;
@@ -2055,8 +2359,8 @@ function openLightbox(batchItems, startIndex) {
             if (sdrUrl) {
                 imgEl.src = sdrUrl;
                 lightboxSdrToggleActive = true;
-                sdrToggleBtn.classList.add('button-active');
-                updateSaveBtn();
+                _setSdrPill(true);
+                // updateSaveBtn();
                 // Hide analysis overlay while SDR view is active
                 const metaOverlay = imageWrapper.querySelector('.image-meta-overlay');
                 if (metaOverlay) metaOverlay.style.visibility = 'hidden';
@@ -2078,12 +2382,29 @@ function openLightbox(batchItems, startIndex) {
             thumb.src = url;
             thumb.alt = item.name;
             thumb.className = 'lightbox-filmstrip-thumb' + (idx === lightboxIndex ? ' lightbox-filmstrip-thumb-active' : '');
-            thumb.addEventListener('click', (e) => { e.stopPropagation(); lightboxIndex = idx; renderLightboxImage(); });
+            // Track mousedown position so a drag-scroll doesn't fire a spurious click
+            let _thumbMousedownX = 0, _thumbMousedownY = 0;
+            thumb.addEventListener('mousedown', (e) => {
+                _thumbMousedownX = e.clientX;
+                _thumbMousedownY = e.clientY;
+            });
+            thumb.addEventListener('click', (e) => {
+                e.stopPropagation();
+                // Ignore if the mouse moved more than 4px — user was drag-scrolling, not clicking
+                if (Math.abs(e.clientX - _thumbMousedownX) > 4 || Math.abs(e.clientY - _thumbMousedownY) > 4) return;
+                lightboxIndex = idx;
+                renderLightboxImage();
+            });
             filmstrip.appendChild(thumb);
         });
     }
 
     rebuildFilmstrip();
+    // Scroll active thumb into view after layout — block:nearest avoids moving the page vertically
+    requestAnimationFrame(() => {
+        const _activeThumb = filmstrip.querySelector('.lightbox-filmstrip-thumb-active');
+        if (_activeThumb) _activeThumb.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'instant' });
+    });
     _lightboxRender = renderLightboxImage;
     // Defer the first render by one rAF so the browser paints the overlay shell
     // immediately — the image load + decode then starts on the next frame rather
@@ -2094,43 +2415,38 @@ function openLightbox(batchItems, startIndex) {
         renderLightboxImage();
     });
 
-    // ── Sync toolbar width to actual rendered image width ──
-    // ResizeObserver tracks the real paint rect of imgEl so the button groups
-    // always align with the image edges regardless of aspect ratio or viewport size.
-    // After setting the width, it checks whether the buttons still fit — if either
-    // side is overflowing it adds `toolbar-compact` to hide labels automatically.
-    function _updateToolbarWidth(w) {
-        toolbarInner.style.width    = w + 'px';
-        toolbarInner.style.maxWidth = 'none';
-        // Temporarily remove compact class so labels render at full width for measurement
-        toolbarInner.classList.remove('toolbar-compact');
-        // Measure the actual last button on the left and first button on the right,
-        // not the flex containers (which always span half the toolbar each).
-        const leftBtns  = toolbarLeft.querySelectorAll('button');
-        const rightBtns = toolbarRight.querySelectorAll('button');
-        const lastLeft  = leftBtns[leftBtns.length - 1];
-        const firstRight = rightBtns[0];
-        if (!lastLeft || !firstRight) return;
-        const collides = lastLeft.getBoundingClientRect().right >= firstRight.getBoundingClientRect().left - 12;
-        toolbarInner.classList.toggle('toolbar-compact', collides);
-    }
-    const _toolbarRO = new ResizeObserver(entries => {
-        const w = entries[0]?.contentRect.width;
-        if (w && w > 0) _updateToolbarWidth(w);
-    });
-    _toolbarRO.observe(imgEl);
-
     // Store cleanup ref on overlay for closeLightbox
     overlay._cleanupMouseUp = _mouseUpLightbox;
-    overlay._cleanupRO = _toolbarRO;
+    window.addEventListener('resize', _onLightboxResize);
+    overlay._cleanupResize  = _onLightboxResize;
 }
 
 let _lightboxRender = null; // set by openLightbox, called by navigateLightbox
+let _arrowThrottleLast  = -Infinity; // timestamp of last throttled arrow render
+let _arrowThrottleTimer = null;      // trailing-edge timer handle
+
+// Keyed by sdrUrl — holds hidden Image objects to keep SDR images in the browser cache.
+const _sdrPreloadCache = new Map();
+
+// Preload the SDR image for the item at `index` and its immediate neighbours.
+function _prefetchSdrImages(index) {
+    for (const i of [index, index - 1, index + 1]) {
+        const item = lightboxBatch[i];
+        if (!item) continue;
+        const entry = lightboxBlobUrls.get(item.id);
+        const url   = entry?.sdrUrl;
+        if (!url || _sdrPreloadCache.has(url)) continue;
+        const img = new Image();
+        img.src = url;
+        _sdrPreloadCache.set(url, img);
+    }
+}
 
 function navigateLightbox(direction) {
     const newIndex = lightboxIndex + direction;
     if (newIndex < 0 || newIndex >= lightboxBatch.length) return;
     lightboxIndex = newIndex;
+    _prefetchSdrImages(newIndex);
     if (_lightboxRender) _lightboxRender();
 }
 
@@ -2138,7 +2454,7 @@ function closeLightbox() {
     const overlay = document.getElementById('lightbox-overlay');
     if (overlay) {
         if (overlay._cleanupMouseUp) document.removeEventListener('mouseup', overlay._cleanupMouseUp);
-        if (overlay._cleanupRO) overlay._cleanupRO.disconnect();
+        if (overlay._cleanupResize)  window.removeEventListener('resize', overlay._cleanupResize);
         overlay.classList.add('lightbox-closing');
         overlay.style.opacity = '0';
         const duration = parseFloat(getComputedStyle(overlay).transitionDuration) * 1000;
@@ -2147,41 +2463,32 @@ function closeLightbox() {
     document.body.style.overflow = '';
     document.documentElement.style.overflow = '';
     lightboxOpen = false;
-    // Remove the ?img= param so the URL goes back to the gallery
-    history.replaceState(null, '', location.pathname);
+    // Remove the ?img= param and restore ?game= if a filter is active
+    _syncGameUrl(gameSearchQuery.trim());
     lightboxBatch = [];
     lightboxIndex = 0;
-    lightboxPixelBuffer = null;
     lightboxSdrToggleActive = false;
     _lightboxRender = null;
     _lightboxResetZoomIdleTimer = null;
+    _sdrPreloadCache.clear();
+    _arrowThrottleLast  = -Infinity;
+    clearTimeout(_arrowThrottleTimer);
+    _arrowThrottleTimer = null;
     globalDetailsEnabled = false;
     nitTooltip.style.display = 'none';
     zoomTooltip.style.display = 'none';
     // Clear lightbox image wrapper from the map so details mode doesn't break
     imageWrappers.clear();
     currentVisibleImage = null;
-    revokeLightboxUrls();
-}
-
-// Keep old createGalleryItem stub so nothing breaks if referenced elsewhere
-function createGalleryItem(imageItem) {
-    return createCollageCard([imageItem]);
+    _prefetchedImages.clear();
+    _lbPoolSlots.clear();
+    if (_lbDecodePool) { _lbDecodePool.remove(); _lbDecodePool = null; }
 }
 
 // ─── Utilities ───────────────────────────────────────────────────────────────
 
 function isInsideRect(x, y, rect) {
     return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
-}
-
-function downloadFile(url, filename) {
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = filename;
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
 }
 
 // ─── Step Progress Bar ────────────────────────────────────────────────────────
@@ -2326,95 +2633,6 @@ function formatFileSize(bytes) {
     return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
 }
 
-// ─── HDR / SDR Comparison Slider ─────────────────────────────────────────────
-
-function buildInlineComparison(galleryItem, originalEl, hdrBlob, sdrBlob, onReady) {
-    const slider = document.createElement('div');
-    slider.className = 'inline-comparison-slider';
-
-    // HDR image (base layer, sets the size)
-    const hdrImg = document.createElement('img');
-    hdrImg.className = 'inline-comparison-hdr';
-    hdrImg.src = URL.createObjectURL(hdrBlob);
-    createdUrls.push(hdrImg.src);
-
-    // SDR image (clipped overlay)
-    const sdrImg = document.createElement('img');
-    sdrImg.className = 'inline-comparison-sdr';
-    sdrImg.src = URL.createObjectURL(sdrBlob);
-    createdUrls.push(sdrImg.src);
-
-        const divider = document.createElement('div');
-    divider.className = 'inline-comparison-divider';
-
-        const sdrLabel = document.createElement('span');
-    sdrLabel.className = 'inline-comparison-label inline-comparison-label-sdr';
-    sdrLabel.textContent = 'SDR';
-
-    const hdrLabel = document.createElement('span');
-    hdrLabel.className = 'inline-comparison-label inline-comparison-label-hdr';
-    hdrLabel.textContent = 'HDR';
-
-    slider.appendChild(hdrImg);
-    slider.appendChild(sdrImg);
-    slider.appendChild(divider);
-    slider.appendChild(sdrLabel);
-    slider.appendChild(hdrLabel);
-
-    // Keep out of flow until ready to avoid reflowing other gallery items
-    slider.style.visibility = 'hidden';
-    slider.style.position = 'absolute';
-
-    // Insert before the info section (after any existing img)
-    galleryItem.insertBefore(slider, originalEl.nextSibling);
-
-    hdrImg.onload = () => {
-        if (onReady) onReady();
-        slider.style.position = '';
-        slider.style.visibility = '';
-        let isDragging = false;
-
-        const LABEL_WIDTH = 70; // px — enough to cover label + padding
-
-        function updateSlider(clientX) {
-            const rect = slider.getBoundingClientRect();
-            const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-            const dividerX = pct * rect.width;
-            sdrImg.style.clipPath = `inset(0 ${(1 - pct) * 100}% 0 0)`;
-            divider.style.left = `${pct * 100}%`;
-
-            // Hide SDR label (left side) when divider sweeps over it
-            sdrLabel.style.opacity = dividerX < LABEL_WIDTH ? '0' : '1';
-            // Hide HDR label (right side) when divider sweeps over it
-            hdrLabel.style.opacity = dividerX > rect.width - LABEL_WIDTH ? '0' : '1';
-        }
-
-        updateSlider(slider.getBoundingClientRect().left + slider.getBoundingClientRect().width * 0.5);
-
-        slider.addEventListener('mousedown', (e) => {
-            isDragging = true;
-            updateSlider(e.clientX);
-            e.preventDefault();
-        });
-        document.addEventListener('mousemove', (e) => {
-            if (isDragging) updateSlider(e.clientX);
-        });
-        document.addEventListener('mouseup', () => { isDragging = false; });
-
-        slider.addEventListener('touchstart', (e) => {
-            isDragging = true;
-            updateSlider(e.touches[0].clientX);
-        }, { passive: true });
-        document.addEventListener('touchmove', (e) => {
-            if (isDragging) {
-                updateSlider(e.touches[0].clientX);
-                e.preventDefault();
-            }
-        }, { passive: false });
-        document.addEventListener('touchend', () => { isDragging = false; });
-    };
-}
-
 // ─── Metadata Overlay Panels ─────────────────────────────────────────────────
 
 function showMetadataOverlay(filename, metadata, imageWrapper) {
@@ -2513,6 +2731,16 @@ function showMetadataOverlay(filename, metadata, imageWrapper) {
         const minLeft = bRect.left - oRect.left;
         const minTop  = bRect.top  - oRect.top;
 
+        // Compute and apply max-height so the panel never overflows the image area.
+        // Called on first placement and after every drag move so the panel stays
+        // scrollable regardless of where it's been dragged to.
+        function setPanelMaxHeight(panelTop, imgBRect, overlayBRect) {
+            // Bottom edge of image in overlay-relative coords
+            const imgBottom = imgBRect.top - overlayBRect.top + imgBRect.height;
+            const available = imgBottom - panelTop - 8; // 8px bottom breathing room
+            panel.style.maxHeight = Math.max(80, available) + 'px';
+        }
+
         if (imoPanelPositions.single) {
             const saved = imoPanelPositions.single;
             const pRect = panel.getBoundingClientRect();
@@ -2526,18 +2754,22 @@ function showMetadataOverlay(filename, metadata, imageWrapper) {
             const t = Math.max(minTopAllowed,  Math.min(maxTopAllowed,  saved.top));
             panel.style.left = l + 'px';
             panel.style.top  = t + 'px';
+            setPanelMaxHeight(t, bRect, oRect);
         } else {
             panel.style.left = minLeft + 'px';
             panel.style.top  = minTop  + 'px';
+            setPanelMaxHeight(minTop, bRect, oRect);
         }
 
         // Drag logic
-        const TEXT_TAGS = new Set(['SPAN', 'BUTTON', 'INPUT', 'TEXTAREA', 'SELECT', 'LABEL', 'A']);
+        // Only block drag on actual interactive controls — not SPAN/LABEL which make up
+        // nearly all visible panel content (imo-label, imo-value, imo-pct).
+        const INTERACTIVE_TAGS = new Set(['BUTTON', 'INPUT', 'TEXTAREA', 'SELECT', 'A']);
 
         panel.addEventListener('mousedown', (e) => {
-            const fromHandle = e.target.classList.contains('imo-drag-handle');
-            const fromText   = TEXT_TAGS.has(e.target.tagName);
-            if (!fromHandle && fromText) return;
+            const fromHandle      = e.target.classList.contains('imo-drag-handle');
+            const fromInteractive = INTERACTIVE_TAGS.has(e.target.tagName);
+            if (!fromHandle && fromInteractive) return;
 
             // Notify the lightbox overlay that drag started inside content,
             // so releasing outside doesn't trigger a spurious close click.
@@ -2570,8 +2802,10 @@ function showMetadataOverlay(filename, metadata, imageWrapper) {
                 const minTop  = bRect.top  - oRect.top  - overflow;
                 const maxLeft = minLeft + bRect.width  - pRect.width + (overflow * 2);
                 const maxTop  = minTop  + bRect.height - pRect.height + (overflow * 2);
+                const newTop  = Math.max(minTop,  Math.min(maxTop,  rawTop));
                 panel.style.left = Math.max(minLeft, Math.min(maxLeft, rawLeft)) + 'px';
-                panel.style.top  = Math.max(minTop,  Math.min(maxTop,  rawTop))  + 'px';
+                panel.style.top  = newTop + 'px';
+                setPanelMaxHeight(newTop, bRect, oRect);
             }
 
             function onUp() {
@@ -2593,6 +2827,75 @@ function showMetadataOverlay(filename, metadata, imageWrapper) {
             document.addEventListener('mousemove', onMove);
             document.addEventListener('mouseup',   onUp);
         });
+
+        // ── Touch drag (mirrors mouse logic, with max-height update) ────────
+        panel.addEventListener('touchstart', (e) => {
+            const fromInteractive = INTERACTIVE_TAGS.has(e.target.tagName);
+            if (fromInteractive) return;
+
+            // Single-finger drag only — two fingers are for pinch/pan on the image
+            if (e.touches.length !== 1) return;
+
+            const lbOverlay = document.getElementById('lightbox-overlay');
+            if (lbOverlay?._setMousedownInsideContent) lbOverlay._setMousedownInsideContent(true);
+
+            e.stopPropagation();
+
+            const touch      = e.touches[0];
+            const startLeft  = parseFloat(panel.style.left);
+            const startTop   = parseFloat(panel.style.top);
+            const startX     = touch.clientX;
+            const startY     = touch.clientY;
+            const startWidth = panel.getBoundingClientRect().width;
+            let   dragging   = false;
+
+            function onTouchMove(e) {
+                if (e.touches.length !== 1) return;
+                const t  = e.touches[0];
+                const dx = t.clientX - startX;
+                const dy = t.clientY - startY;
+
+                // Small threshold before committing to drag so taps don't move the panel
+                if (!dragging) {
+                    if (Math.sqrt(dx * dx + dy * dy) < 6) return;
+                    dragging = true;
+                    panel.style.width = startWidth + 'px';
+                }
+
+                e.preventDefault(); // suppress page scroll once dragging
+
+                const imgEl    = imageWrapper.querySelector('.lightbox-image');
+                const boundsEl = imgEl || overlay;
+                const bRect    = boundsEl.getBoundingClientRect();
+                const oRect    = overlay.getBoundingClientRect();
+                const pRect    = panel.getBoundingClientRect();
+                const overflow = 4;
+                const minLeft  = bRect.left - oRect.left - overflow;
+                const minTop   = bRect.top  - oRect.top  - overflow;
+                const maxLeft  = minLeft + bRect.width  - pRect.width  + (overflow * 2);
+                const maxTop   = minTop  + bRect.height - pRect.height + (overflow * 2);
+                const newTop   = Math.max(minTop, Math.min(maxTop, startTop + dy));
+                panel.style.left = Math.max(minLeft, Math.min(maxLeft, startLeft + dx)) + 'px';
+                panel.style.top  = newTop + 'px';
+                setPanelMaxHeight(newTop, bRect, oRect);
+            }
+
+            function onTouchEnd() {
+                if (dragging) {
+                    panel.style.width = '';
+                    imoPanelPositions.single = {
+                        left: parseFloat(panel.style.left),
+                        top:  parseFloat(panel.style.top)
+                    };
+                    saveImoPanelPositions();
+                }
+                document.removeEventListener('touchmove', onTouchMove);
+                document.removeEventListener('touchend',  onTouchEnd);
+            }
+
+            document.addEventListener('touchmove', onTouchMove, { passive: false });
+            document.addEventListener('touchend',  onTouchEnd);
+        }, { passive: true });
     });
 }
 
@@ -2606,6 +2909,195 @@ function imoGamutRow(label, pct, color) {
         <span class="gamut-bar-wrap"><span class="gamut-bar" style="width:${pct}%;background:${color}"></span></span>
         <span class="imo-pct">${pct}%</span>
     </div>`;
+}
+
+// ─── Shared Modal Helpers ─────────────────────────────────────────────────────
+
+async function searchRawg(query) {
+    const url = `https://api.rawg.io/api/games?key=${CONFIG.rawgKey}&search=${encodeURIComponent(query)}&page_size=8`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('RAWG request failed');
+    const data = await res.json();
+    return data.results || [];
+}
+
+// Wires up game-search behaviour on an already-rendered modal DOM.
+// Expects: .game-search-input, .game-search-results inside `modal`.
+// `onSelect(name)` is called whenever the user confirms a name (click or blur).
+function _setupGameSearch(modal, initialValue, onSelect) {
+    const searchInput = modal.querySelector('.game-search-input');
+    const resultsEl   = modal.querySelector('.game-search-results');
+    if (!searchInput || !resultsEl) return;
+
+    if (initialValue) searchInput.value = initialValue;
+
+    const modalEl = searchInput.closest('.modal');
+    const modalBody = searchInput.closest('.modal-body');
+
+    function showResults() {
+        resultsEl.style.display = 'flex';
+        if (modalBody) modalBody.style.overflow = 'visible';
+        if (modalEl)   modalEl.style.overflow   = 'visible';
+    }
+
+    function hideResults() {
+        resultsEl.innerHTML = '';
+        resultsEl.style.display = 'none';
+        if (modalBody) modalBody.style.overflow = '';
+        if (modalEl)   modalEl.style.overflow   = '';
+    }
+
+    async function doSearch() {
+        const q = searchInput.value.trim();
+        if (!q) return;
+        resultsEl.innerHTML = '<div class="game-search-status">Searching…</div>';
+        showResults();
+        try {
+            const results = await searchRawg(q);
+            resultsEl.innerHTML = '';
+            if (results.length === 0) {
+                resultsEl.innerHTML = '<div class="game-search-status">No results found</div>';
+                showResults();
+                return;
+            }
+            results.forEach(game => {
+                const item = document.createElement('div');
+                item.className = 'game-result-item';
+                item.textContent = game.name + (game.released ? ` (${game.released.slice(0, 4)})` : '');
+                item.onclick = () => {
+                    onSelect(game.name);
+                    searchInput.value = game.name;
+                    hideResults();
+                };
+                resultsEl.appendChild(item);
+            });
+            showResults();
+        } catch (_) {
+            resultsEl.innerHTML = '<div class="game-search-status">Search failed</div>';
+            showResults();
+        }
+    }
+
+    let debounceTimer = null;
+    let highlightedIndex = -1;
+
+    searchInput.addEventListener('input', () => {
+        onSelect(searchInput.value.trim() || null);
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(doSearch, 350);
+    });
+
+    function getItems() { return Array.from(resultsEl.querySelectorAll('.game-result-item')); }
+
+    function setHighlight(idx) {
+        const items = getItems();
+        items.forEach(el => el.classList.remove('game-result-item-highlighted'));
+        highlightedIndex = Math.max(-1, Math.min(idx, items.length - 1));
+        if (highlightedIndex >= 0) {
+            items[highlightedIndex].classList.add('game-result-item-highlighted');
+            items[highlightedIndex].scrollIntoView({ block: 'nearest' });
+        }
+    }
+
+    searchInput.addEventListener('keydown', (e) => {
+        const items = getItems();
+        if (e.key === 'ArrowDown')       { e.preventDefault(); setHighlight(highlightedIndex + 1); }
+        else if (e.key === 'ArrowUp')    { e.preventDefault(); setHighlight(highlightedIndex - 1); }
+        else if (e.key === 'Enter') {
+            e.preventDefault();
+            if (highlightedIndex >= 0 && items[highlightedIndex]) {
+                items[highlightedIndex].click(); highlightedIndex = -1;
+            } else { clearTimeout(debounceTimer); doSearch(); }
+        } else if (e.key === 'Escape') {
+            e.stopPropagation();
+            hideResults(); highlightedIndex = -1;
+        }
+    });
+    searchInput.addEventListener('blur', () => {
+        setTimeout(() => {
+            // If the HDR dropdown is open, only clear the results visually.
+            // Resetting modal overflow here would collapse the HDR dropdown.
+            if (modalEl?.querySelector('.hdr-trigger-open')) {
+                resultsEl.innerHTML = '';
+                resultsEl.style.display = 'none';
+                return;
+            }
+            hideResults();
+        }, 150);
+    });
+}
+
+// Builds and wires up the custom HDR type dropdown inside `wrapEl`.
+// Returns { getValue() } so callers can read the selected value on submit.
+function _buildHdrDropdown(wrapEl, initialValue) {
+    const trigger  = wrapEl.querySelector('.hdr-custom-trigger');
+    const dropdown = wrapEl.querySelector('.hdr-custom-dropdown');
+    const label    = wrapEl.querySelector('.hdr-custom-label');
+    const modal    = wrapEl.closest('.modal');
+
+    let selected = initialValue || null;
+
+    function setValue(val) {
+        selected = val || null;
+        const def = HDR_TYPES.find(t => t.id === val);
+        label.textContent = def ? def.label : 'Unspecified';
+        dropdown.querySelectorAll('.hdr-custom-item').forEach(el =>
+            el.classList.toggle('hdr-custom-item-active', el.dataset.value === (val || '')));
+    }
+
+    function closeDropdown() {
+        dropdown.style.display = 'none';
+        trigger.classList.remove('hdr-trigger-open');
+        const mb = modal?.querySelector('.modal-body'); if (mb) mb.style.overflow = '';
+        if (modal) modal.style.overflow = '';
+    }
+
+    // None item
+    const noneItem = document.createElement('div');
+    noneItem.className = 'hdr-custom-item';
+    noneItem.dataset.value = '';
+    noneItem.textContent = 'Unspecified';
+    noneItem.addEventListener('mousedown', e => { e.preventDefault(); setValue(''); closeDropdown(); });
+    dropdown.appendChild(noneItem);
+
+    [...new Set(HDR_TYPES.map(t => t.group))].forEach(groupName => {
+        const gh = document.createElement('div');
+        gh.className = 'hdr-custom-group-header';
+        gh.textContent = '▸ ' + groupName;
+        dropdown.appendChild(gh);
+        HDR_TYPES.filter(t => t.group === groupName).forEach(type => {
+            const item = document.createElement('div');
+            item.className = 'hdr-custom-item hdr-custom-item-indented';
+            item.dataset.value = type.id;
+            item.textContent = type.label;
+            item.addEventListener('mousedown', e => { e.preventDefault(); setValue(type.id); closeDropdown(); });
+            dropdown.appendChild(item);
+        });
+    });
+
+    dropdown.addEventListener('mousedown', e => e.preventDefault());
+    trigger.addEventListener('mousedown', e => {
+        e.preventDefault();
+        if (dropdown.style.display === 'flex') { closeDropdown(); } else {
+            dropdown.style.display = 'flex';
+            trigger.classList.add('hdr-trigger-open');
+            const mb = modal?.querySelector('.modal-body'); if (mb) mb.style.overflow = 'visible';
+            if (modal) modal.style.overflow = 'visible';
+            // Blur any focused input (e.g. game search) to stop the cursor blinking.
+            // Safe now: _setupGameSearch blur handler checks for hdr-trigger-open
+            // and skips the overflow reset, so the HDR dropdown won't be occluded.
+            const _focusedInput = modal?.querySelector('input:focus');
+            if (_focusedInput) _focusedInput.blur();
+        }
+    });
+    if (modal) {
+        modal.addEventListener('mousedown', e => {
+            if (dropdown.style.display === 'flex' && !e.target.closest(wrapEl.id ? `#${wrapEl.id}` : '.hdr-custom-select-wrap')) closeDropdown();
+        });
+    }
+
+    setValue(initialValue ?? '');
+    return { getValue: () => selected };
 }
 
 // ─── Import Modal ─────────────────────────────────────────────────────────────
@@ -2665,154 +3157,20 @@ function showImportModal(fileCount, files = []) {
 
         overlay.appendChild(modal);
         document.body.appendChild(overlay);
+        document.body.style.overflow = 'hidden';
+        document.documentElement.style.overflow = 'hidden';
 
-        const searchInput = modal.querySelector('.game-search-input');
-        const resultsEl   = modal.querySelector('.game-search-results');
         const importBtn   = modal.querySelector('.modal-import');
+        const searchInput = modal.querySelector('.game-search-input');
 
-        let selected = null;
         let selectedGameName = null;
+        _setupGameSearch(modal, null, (name) => { selectedGameName = name; });
 
-        // ── Game search ──
-        async function doSearch() {
-            const q = searchInput.value.trim();
-            if (!q) return;
-            resultsEl.innerHTML = '<div class="game-search-status">Searching…</div>';
-            resultsEl.style.display = 'flex';
-            try {
-                const results = await searchRawg(q);
-                resultsEl.innerHTML = '';
-                resultsEl.style.display = 'none';
-                if (results.length === 0) {
-                    resultsEl.innerHTML = '<div class="game-search-status">No results found</div>';
-                    resultsEl.style.display = 'flex';
-                    return;
-                }
-                results.forEach(game => {
-                    const item = document.createElement('div');
-                    item.className = 'game-result-item';
-                    item.textContent = game.name;
-                    if (game.released) item.textContent += ` (${game.released.slice(0, 4)})`;
-                    item.onclick = () => {
-                        selectedGameName = game.name;
-                        searchInput.value = game.name;
-                        resultsEl.innerHTML = '';
-                        resultsEl.style.display = 'none';
-                    };
-                    resultsEl.appendChild(item);
-                });
-                resultsEl.style.display = 'flex';
-            } catch (err) {
-                resultsEl.innerHTML = '<div class="game-search-status">Search failed</div>';
-                resultsEl.style.display = 'flex';
-            }
-        }
-
-        let debounceTimer = null;
-        searchInput.addEventListener('input', () => {
-            selectedGameName = searchInput.value.trim() || null;
-            clearTimeout(debounceTimer);
-            debounceTimer = setTimeout(doSearch, 350);
-        });
-        let highlightedIndex = -1;
-
-        function getResultItems() {
-            return Array.from(resultsEl.querySelectorAll('.game-result-item'));
-        }
-
-        function setHighlight(idx) {
-            const items = getResultItems();
-            items.forEach(el => el.classList.remove('game-result-item-highlighted'));
-            highlightedIndex = Math.max(-1, Math.min(idx, items.length - 1));
-            if (highlightedIndex >= 0) {
-                items[highlightedIndex].classList.add('game-result-item-highlighted');
-                items[highlightedIndex].scrollIntoView({ block: 'nearest' });
-            }
-        }
-
-        searchInput.addEventListener('keydown', (e) => {
-            const items = getResultItems();
-            if (e.key === 'ArrowDown') {
-                e.preventDefault();
-                setHighlight(highlightedIndex + 1);
-            } else if (e.key === 'ArrowUp') {
-                e.preventDefault();
-                setHighlight(highlightedIndex - 1);
-            } else if (e.key === 'Enter') {
-                e.preventDefault();
-                if (highlightedIndex >= 0 && items[highlightedIndex]) {
-                    items[highlightedIndex].click();
-                    highlightedIndex = -1;
-                } else {
-                    clearTimeout(debounceTimer);
-                    doSearch();
-                }
-            } else if (e.key === 'Escape') {
-                e.stopPropagation();
-                resultsEl.innerHTML = '';
-                resultsEl.style.display = 'none';
-                highlightedIndex = -1;
-            }
-        });
-        searchInput.addEventListener('blur', () => {
-            setTimeout(() => { resultsEl.innerHTML = ''; resultsEl.style.display = 'none'; }, 150);
-        });
-
-        // Build custom HDR type dropdown
-        const _importHdrTrigger  = modal.querySelector('#importHdrWrap .hdr-custom-trigger');
-        const _importHdrDropdown = modal.querySelector('#importHdrWrap .hdr-custom-dropdown');
-        const _importHdrLabel    = modal.querySelector('#importHdrWrap .hdr-custom-label');
-
-        function _importSetHdr(val) {
-            selected = val || null;
-            const def = HDR_TYPES.find(t => t.id === val);
-            _importHdrLabel.textContent = def ? def.label : 'Unspecified';
-            _importHdrDropdown.querySelectorAll('.hdr-custom-item').forEach(el =>
-                el.classList.toggle('hdr-custom-item-active', el.dataset.value === (val || '')));
-        }
-        function _importCloseHdr() {
-            _importHdrDropdown.style.display = 'none';
-            _importHdrTrigger.classList.remove('hdr-trigger-open');
-        }
-
-        // None item
-        const _importNoneItem = document.createElement('div');
-        _importNoneItem.className = 'hdr-custom-item';
-        _importNoneItem.dataset.value = '';
-        _importNoneItem.textContent = 'Unspecified';
-        _importNoneItem.addEventListener('mousedown', e => { e.preventDefault(); _importSetHdr(''); _importCloseHdr(); });
-        _importHdrDropdown.appendChild(_importNoneItem);
-
-        [...new Set(HDR_TYPES.map(t => t.group))].forEach(groupName => {
-            const gh = document.createElement('div');
-            gh.className = 'hdr-custom-group-header';
-            gh.textContent = '▸ ' + groupName;
-            _importHdrDropdown.appendChild(gh);
-            HDR_TYPES.filter(t => t.group === groupName).forEach(type => {
-                const item = document.createElement('div');
-                item.className = 'hdr-custom-item hdr-custom-item-indented';
-                item.dataset.value = type.id;
-                item.textContent = type.label;
-                item.addEventListener('mousedown', e => { e.preventDefault(); _importSetHdr(type.id); _importCloseHdr(); });
-                _importHdrDropdown.appendChild(item);
-            });
-        });
-
-        _importHdrTrigger.addEventListener('mousedown', e => {
-            e.preventDefault();
-            const isOpen = _importHdrDropdown.style.display === 'flex';
-            if (isOpen) { _importCloseHdr(); } else {
-                _importHdrDropdown.style.display = 'flex';
-                _importHdrTrigger.classList.add('hdr-trigger-open');
-            }
-        });
-        modal.addEventListener('mousedown', e => {
-            if (_importHdrDropdown.style.display === 'flex' && !e.target.closest('#importHdrWrap')) _importCloseHdr();
-        });
-
-        _importSetHdr(selected ?? '');
+        const hdrDropdown = _buildHdrDropdown(modal.querySelector('#importHdrWrap'), null);
 
         modal.querySelector('.modal-cancel').onclick = () => {
+            document.body.style.overflow = '';
+            document.documentElement.style.overflow = '';
             overlay.remove();
             document.removeEventListener('keydown', onImportKeydown, true);
             resolve(null);
@@ -2821,9 +3179,11 @@ function showImportModal(fileCount, files = []) {
         importBtn.onclick = () => {
             const spoiler = modal.querySelector('.modal-spoiler-checkbox').checked;
             const additionalInfo = modal.querySelector('.modal-additional-info-input').value.trim() || null;
+            document.body.style.overflow = '';
+            document.documentElement.style.overflow = '';
             overlay.remove();
             document.removeEventListener('keydown', onImportKeydown, true);
-            resolve({ hdrType: selected ?? 'unknown', gameName: selectedGameName, spoiler, additionalInfo });
+            resolve({ hdrType: hdrDropdown.getValue() ?? 'unknown', gameName: selectedGameName, spoiler, additionalInfo });
         };
 
         let importMousedownOnModal = false;
@@ -2831,6 +3191,8 @@ function showImportModal(fileCount, files = []) {
         overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) importMousedownOnModal = false; });
         overlay.addEventListener('click', (e) => {
             if (e.target === overlay && !importMousedownOnModal) {
+                document.body.style.overflow = '';
+                document.documentElement.style.overflow = '';
                 overlay.remove();
                 document.removeEventListener('keydown', onImportKeydown, true);
                 resolve(null);
@@ -2841,6 +3203,8 @@ function showImportModal(fileCount, files = []) {
         const onImportKeydown = (e) => {
             if (e.key === 'Escape') {
                 e.stopPropagation();
+                document.body.style.overflow = '';
+                document.documentElement.style.overflow = '';
                 overlay.remove();
                 document.removeEventListener('keydown', onImportKeydown, true);
                 resolve(null);
@@ -2854,16 +3218,6 @@ function showImportModal(fileCount, files = []) {
 }
 
 // ─── Edit Modal ───────────────────────────────────────────────────────────────
-
-const RAWG_KEY = '2ed92fc542034b3ea93847700be1043b';
-
-async function searchRawg(query) {
-    const url = `https://api.rawg.io/api/games?key=${RAWG_KEY}&search=${encodeURIComponent(query)}&page_size=8`;
-    const res = await fetch(url);
-    if (!res.ok) throw new Error('RAWG request failed');
-    const data = await res.json();
-    return data.results || [];
-}
 
 function showEditModal(currentHdrType, currentGameName, currentSpoiler, thumbUrl, currentAdditionalInfo) {
     return new Promise((resolve) => {
@@ -2915,104 +3269,22 @@ function showEditModal(currentHdrType, currentGameName, currentSpoiler, thumbUrl
 
         overlay.appendChild(modal);
         document.body.appendChild(overlay);
+        document.body.style.overflow = 'hidden';
+        document.documentElement.style.overflow = 'hidden';
 
-        const searchInput = modal.querySelector('.game-search-input');
-        const resultsEl   = modal.querySelector('.game-search-results');
-        const saveBtn     = modal.querySelector('.modal-import');
+        const saveBtn = modal.querySelector('.modal-import');
 
-        let selectedHdrType = currentHdrType;
         let selectedGameName = currentGameName || null;
+        _setupGameSearch(modal, currentGameName, (name) => { selectedGameName = name; });
 
-        // ── Game search ──
-        async function doSearch() {
-            const q = searchInput.value.trim();
-            if (!q) return;
-            resultsEl.innerHTML = '<div class="game-search-status">Searching…</div>';
-            resultsEl.style.display = 'flex';
-            try {
-                const results = await searchRawg(q);
-                resultsEl.innerHTML = '';
-                resultsEl.style.display = 'none';
-                if (results.length === 0) {
-                    resultsEl.innerHTML = '<div class="game-search-status">No results found</div>';
-                    resultsEl.style.display = 'flex';
-                    return;
-                }
-                results.forEach(game => {
-                    const item = document.createElement('div');
-                    item.className = 'game-result-item';
-                    item.textContent = game.name;
-                    if (game.released) item.textContent += ` (${game.released.slice(0, 4)})`;
-                    item.onclick = () => {
-                        selectedGameName = game.name;
-                        searchInput.value = game.name;
-                        resultsEl.innerHTML = '';
-                        resultsEl.style.display = 'none';
-                    };
-                    resultsEl.appendChild(item);
-                });
-                resultsEl.style.display = 'flex';
-            } catch (err) {
-                resultsEl.innerHTML = '<div class="game-search-status">Search failed</div>';
-                resultsEl.style.display = 'flex';
-            }
-        }
-
-
-        let debounceTimer = null;
-        searchInput.addEventListener('input', () => {
-            clearTimeout(debounceTimer);
-            debounceTimer = setTimeout(doSearch, 350);
-        });
-        let highlightedIndex = -1;
-
-        function getResultItems() {
-            return Array.from(resultsEl.querySelectorAll('.game-result-item'));
-        }
-
-        function setHighlight(idx) {
-            const items = getResultItems();
-            items.forEach(el => el.classList.remove('game-result-item-highlighted'));
-            highlightedIndex = Math.max(-1, Math.min(idx, items.length - 1));
-            if (highlightedIndex >= 0) {
-                items[highlightedIndex].classList.add('game-result-item-highlighted');
-                items[highlightedIndex].scrollIntoView({ block: 'nearest' });
-            }
-        }
-
-        searchInput.addEventListener('keydown', (e) => {
-            const items = getResultItems();
-            if (e.key === 'ArrowDown') {
-                e.preventDefault();
-                setHighlight(highlightedIndex + 1);
-            } else if (e.key === 'ArrowUp') {
-                e.preventDefault();
-                setHighlight(highlightedIndex - 1);
-            } else if (e.key === 'Enter') {
-                e.preventDefault();
-                if (highlightedIndex >= 0 && items[highlightedIndex]) {
-                    items[highlightedIndex].click();
-                    highlightedIndex = -1;
-                } else {
-                    clearTimeout(debounceTimer);
-                    doSearch();
-                }
-            } else if (e.key === 'Escape') {
-                e.stopPropagation();
-                resultsEl.innerHTML = '';
-                resultsEl.style.display = 'none';
-                highlightedIndex = -1;
-            }
-        });
-        searchInput.addEventListener('blur', () => {
-            // Delay so a click on a result fires before the list disappears
-            setTimeout(() => { resultsEl.innerHTML = ''; resultsEl.style.display = 'none'; }, 150);
-        });
+        const hdrDropdown = _buildHdrDropdown(modal.querySelector('#editHdrWrap'), currentHdrType);
 
         // Escape closes the modal (without leaking to the lightbox behind)
         const onModalKeydown = (e) => {
             if (e.key === 'Escape') {
                 e.stopPropagation();
+                document.body.style.overflow = '';
+                document.documentElement.style.overflow = '';
                 overlay.remove();
                 document.removeEventListener('keydown', onModalKeydown, true);
                 resolve(null);
@@ -3020,61 +3292,9 @@ function showEditModal(currentHdrType, currentGameName, currentSpoiler, thumbUrl
         };
         document.addEventListener('keydown', onModalKeydown, true);
 
-        // ── Build custom HDR type dropdown ──
-        const _editHdrTrigger  = modal.querySelector('#editHdrWrap .hdr-custom-trigger');
-        const _editHdrDropdown = modal.querySelector('#editHdrWrap .hdr-custom-dropdown');
-        const _editHdrLabel    = modal.querySelector('#editHdrWrap .hdr-custom-label');
-
-        function _editSetHdr(val) {
-            selectedHdrType = val || 'unknown';
-            const def = HDR_TYPES.find(t => t.id === val);
-            _editHdrLabel.textContent = def ? def.label : 'Unspecified';
-            _editHdrDropdown.querySelectorAll('.hdr-custom-item').forEach(el =>
-                el.classList.toggle('hdr-custom-item-active', el.dataset.value === (val || '')));
-        }
-        function _editCloseHdr() {
-            _editHdrDropdown.style.display = 'none';
-            _editHdrTrigger.classList.remove('hdr-trigger-open');
-        }
-
-        // None item
-        const _editNoneItem = document.createElement('div');
-        _editNoneItem.className = 'hdr-custom-item';
-        _editNoneItem.dataset.value = '';
-        _editNoneItem.textContent = 'Unspecified';
-        _editNoneItem.addEventListener('mousedown', e => { e.preventDefault(); _editSetHdr(''); _editCloseHdr(); });
-        _editHdrDropdown.appendChild(_editNoneItem);
-
-        [...new Set(HDR_TYPES.map(t => t.group))].forEach(groupName => {
-            const gh = document.createElement('div');
-            gh.className = 'hdr-custom-group-header';
-            gh.textContent = '▸ ' + groupName;
-            _editHdrDropdown.appendChild(gh);
-            HDR_TYPES.filter(t => t.group === groupName).forEach(type => {
-                const item = document.createElement('div');
-                item.className = 'hdr-custom-item hdr-custom-item-indented';
-                item.dataset.value = type.id;
-                item.textContent = type.label;
-                item.addEventListener('mousedown', e => { e.preventDefault(); _editSetHdr(type.id); _editCloseHdr(); });
-                _editHdrDropdown.appendChild(item);
-            });
-        });
-
-        _editHdrTrigger.addEventListener('mousedown', e => {
-            e.preventDefault();
-            const isOpen = _editHdrDropdown.style.display === 'flex';
-            if (isOpen) { _editCloseHdr(); } else {
-                _editHdrDropdown.style.display = 'flex';
-                _editHdrTrigger.classList.add('hdr-trigger-open');
-            }
-        });
-        modal.addEventListener('mousedown', e => {
-            if (_editHdrDropdown.style.display === 'flex' && !e.target.closest('#editHdrWrap')) _editCloseHdr();
-        });
-
-        _editSetHdr(currentHdrType ?? '');
-
         modal.querySelector('.modal-cancel').onclick = () => {
+            document.body.style.overflow = '';
+            document.documentElement.style.overflow = '';
             overlay.remove();
             document.removeEventListener('keydown', onModalKeydown, true);
             resolve(null);
@@ -3083,9 +3303,11 @@ function showEditModal(currentHdrType, currentGameName, currentSpoiler, thumbUrl
         saveBtn.onclick = () => {
             const spoiler = modal.querySelector('.modal-spoiler-checkbox').checked;
             const additionalInfo = modal.querySelector('.modal-additional-info-input').value.trim() || null;
+            document.body.style.overflow = '';
+            document.documentElement.style.overflow = '';
             overlay.remove();
             document.removeEventListener('keydown', onModalKeydown, true);
-            resolve({ hdrType: selectedHdrType ?? 'unknown', gameName: selectedGameName, spoiler, additionalInfo });
+            resolve({ hdrType: hdrDropdown.getValue() ?? 'unknown', gameName: selectedGameName, spoiler, additionalInfo });
         };
 
         let editMousedownOnModal = false;
@@ -3093,6 +3315,8 @@ function showEditModal(currentHdrType, currentGameName, currentSpoiler, thumbUrl
         overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) editMousedownOnModal = false; });
         overlay.addEventListener('click', (e) => {
             if (e.target === overlay && !editMousedownOnModal) {
+            document.body.style.overflow = '';
+            document.documentElement.style.overflow = '';
                 overlay.remove();
                 document.removeEventListener('keydown', onModalKeydown, true);
                 resolve(null);
@@ -3126,22 +3350,35 @@ function buildFilterBar(allItems) {
     });
 
     bar.innerHTML = `
-        <div class="gallery-search-wrap">
-            <div class="gallery-search-field">
-                <svg class="gallery-search-icon" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-                <input
-                    id="gallerySearchInput"
-                    class="gallery-search-input"
-                    type="text"
-                    placeholder="Search game…"
-                    autocomplete="off"
-                    value="${gameSearchQuery}"
-                />
-                <button id="gallerySearchClear" class="gallery-search-clear" style="display:${gameSearchQuery ? 'flex' : 'none'};" aria-label="Clear search">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        <div class="filter-bar-inner">
+            <div class="gallery-search-wrap">
+                <div class="gallery-search-field">
+                    <svg class="gallery-search-icon" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                    <input
+                        id="gallerySearchInput"
+                        class="gallery-search-input"
+                        type="text"
+                        placeholder="Search game…"
+                        autocomplete="off"
+                        value="${gameSearchQuery}"
+                    />
+                    <button id="gallerySearchClear" class="gallery-search-clear" style="display:${gameSearchQuery ? 'flex' : 'none'};" aria-label="Clear search">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                    </button>
+                </div>
+                <div id="gallerySearchDropdown" class="gallery-search-dropdown"></div>
+            </div>
+            <div class="view-toggle" role="group" aria-label="Gallery view mode" style="display:${gameSearchQuery.trim() ? 'flex' : 'none'}">
+                <button class="view-toggle-btn${gameViewMode === 'list' ? ' active' : ''}" data-view="list" title="List view" aria-label="List view">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="4" rx="1"/><rect x="3" y="11" width="18" height="4" rx="1"/><rect x="3" y="18" width="18" height="4" rx="1"/></svg>
+                </button>
+                <button class="view-toggle-btn${gameViewMode === 'grid2' ? ' active' : ''}" data-view="grid2" title="2-column view" aria-label="2-column view">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+                </button>
+                <button class="view-toggle-btn${gameViewMode === 'grid3' ? ' active' : ''}" data-view="grid3" title="3-column view" aria-label="3-column view">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="5" height="7" rx="1"/><rect x="9.5" y="3" width="5" height="7" rx="1"/><rect x="17" y="3" width="5" height="7" rx="1"/><rect x="2" y="14" width="5" height="7" rx="1"/><rect x="9.5" y="14" width="5" height="7" rx="1"/><rect x="17" y="14" width="5" height="7" rx="1"/></svg>
                 </button>
             </div>
-            <div id="gallerySearchDropdown" class="gallery-search-dropdown"></div>
         </div>
     `;
 
@@ -3280,14 +3517,33 @@ function buildFilterBar(allItems) {
         setTimeout(() => { dropdown.innerHTML = ''; dropdown.style.display = 'none'; }, 160);
     });
 
+    // Close dropdown when clicking anywhere outside the search bar.
+    // blur alone isn't reliable — clicks on non-focusable elements (gallery
+    // images, the banner, empty space) don't steal focus so blur never fires.
+    const _searchBarRoot = bar.querySelector('.gallery-search-bar') || bar;
+    function _galleryDropdownOutsideClick(e) {
+        if (dropdown.style.display !== 'none' && !_searchBarRoot.contains(e.target)) {
+            dropdown.innerHTML = '';
+            dropdown.style.display = 'none';
+            galleryHighlightedIndex = -1;
+        }
+    }
+    document.addEventListener('mousedown', _galleryDropdownOutsideClick);
+
+    clearBtn.addEventListener('mousedown', e => e.preventDefault());
     clearBtn.addEventListener('click', () => {
         gameSearchQuery = '';
         input.value = '';
         clearBtn.style.display = 'none';
-        dropdown.innerHTML = '';
-        dropdown.style.display = 'none';
         renderGallery(_allGalleryItems);
-        input.focus();
+        showSuggestions('');
+    });
+
+    // View toggle buttons
+    bar.querySelectorAll('.view-toggle-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            setGalleryViewMode(btn.dataset.view);
+        });
     });
 }
 
@@ -3306,10 +3562,25 @@ fileInput.addEventListener('change', async () => {
 
 // Initialize gallery on page load
 document.addEventListener('DOMContentLoaded', async () => {
+    // Read params BEFORE refreshGallery - renderGallery calls _syncGameUrl('')
+    // which would wipe ?game= from the URL before we could read it.
+    const _initialParams = new URLSearchParams(location.search);
+    const _gameParam = _initialParams.get('game');
+    const _imgParam  = _initialParams.get('img');
+
+    if (_gameParam) gameSearchQuery = _gameParam;
+
     await refreshGallery();
 
+    // Wire the search input to show the pre-set game filter
+    if (_gameParam && _allGalleryItems.length) {
+        const input    = document.getElementById('gallerySearchInput');
+        const clearBtn = document.getElementById('gallerySearchClear');
+        if (input)    input.value = _gameParam;
+        if (clearBtn) clearBtn.style.display = 'flex';
+    }
+
     // Deep-link: if the URL contains ?img=<firestoreId>, open that image's lightbox
-    const _imgParam = new URLSearchParams(location.search).get('img');
     if (_imgParam && _allGalleryItems.length) {
         const _targetItem = _allGalleryItems.find(it => it.id === _imgParam);
         if (_targetItem) {
@@ -3333,8 +3604,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 document.addEventListener('visibilitychange', () => {
     if (document.hidden || !lightboxOpen) return;
 
-    // GPU dropped all bitmaps on minimize — clear stale promises so we re-decode fresh.
+    // GPU dropped all bitmaps on minimize — clear stale promises and reset pool so we re-decode fresh.
     _decodePromises.clear();
+    _prefetchedImages.clear();
+    _lbPoolSlots.clear();
+    if (_lbDecodePool) _lbDecodePool.innerHTML = '';
 
     // Build outward priority list: current first, then next/prev alternating outward
     const indices = [lightboxIndex];
@@ -3348,18 +3622,14 @@ document.addEventListener('visibilitychange', () => {
         if (!entry) return;
         setTimeout(() => {
             const _t = performance.now();
-            const p = new Image();
-            p.src = entry.fullUrl;
-            const promise = p.decode().then(() => {
+            const poolImg = _poolPrefetch(entry.fullUrl);
+            if (!poolImg) return;
+            const promise = poolImg.decode().then(() => {
                 console.log(`[lightbox] visibility restore decode complete: "${lightboxBatch[i].name}" (slot ${slot})  +${(performance.now()-_t).toFixed(1)}ms`);
             }).catch(() => {});
             _decodePromises.set(entry.fullUrl, promise);
         }, slot * 150);
     });
-});
-
-window.addEventListener('beforeunload', () => {
-    revokeAllUrls();
 });
 
 // Keyboard shortcuts
@@ -3376,9 +3646,45 @@ document.addEventListener('keydown', (e) => {
         return;
     }
 
-    // Arrow navigation
-    if (e.key === 'ArrowLeft')  { e.preventDefault(); navigateLightbox(-1); return; }
-    if (e.key === 'ArrowRight') { e.preventDefault(); navigateLightbox(1);  return; }
+    // Arrow navigation — throttle renders so holding an arrow key scrubs smoothly
+    // through images (like Discord) rather than debouncing to the final image.
+    // _arrowThrottleLast lives outside this handler so it persists across key-repeat events.
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        e.preventDefault();
+        const direction = e.key === 'ArrowLeft' ? -1 : 1;
+        const newIndex = lightboxIndex + direction;
+        if (newIndex < 0 || newIndex >= lightboxBatch.length) return;
+        lightboxIndex = newIndex;
+
+        // Always update filmstrip highlight immediately for visual feedback
+        const filmstrip = document.querySelector('.lightbox-filmstrip');
+        if (filmstrip) {
+            filmstrip.querySelectorAll('.lightbox-filmstrip-thumb').forEach((t, i) => {
+                t.classList.toggle('lightbox-filmstrip-thumb-active', i === lightboxIndex);
+            });
+            const active = filmstrip.querySelector('.lightbox-filmstrip-thumb-active');
+            if (active) active.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'instant' });
+        }
+
+        // Throttle full renders to ~80ms — fires on the first press immediately,
+        // then at most once per 80ms while held, so images flow smoothly.
+        const now = performance.now();
+        const elapsed = now - _arrowThrottleLast;
+        clearTimeout(_arrowThrottleTimer);
+        if (elapsed >= 80) {
+            // Enough time has passed — render immediately
+            _arrowThrottleLast = now;
+            if (_lightboxRender) _lightboxRender();
+        } else {
+            // Too soon — schedule a trailing render for when the throttle window expires
+            // so the final destination is always rendered after key-release.
+            _arrowThrottleTimer = setTimeout(() => {
+                _arrowThrottleLast = performance.now();
+                if (_lightboxRender) _lightboxRender();
+            }, 80 - elapsed);
+        }
+        return;
+    }
 
     // Toggle Analysis Tool with 'A' key
     if (e.key === 'a' || e.key === 'A') {
@@ -3392,6 +3698,15 @@ document.addEventListener('keydown', (e) => {
         if (currentVisibleImage) {
             const imageData = imageWrappers.get(currentVisibleImage);
             if (imageData?.compareButton) imageData.compareButton.click();
+        }
+    }
+
+    // Toggle SDR/HDR pill with 'D' key
+    if (e.key === 'd' || e.key === 'D') {
+        e.preventDefault();
+        if (currentVisibleImage) {
+            const imageData = imageWrappers.get(currentVisibleImage);
+            if (imageData?.sdrToggle) imageData.sdrToggle.click();
         }
     }
 });

@@ -13,7 +13,7 @@
     <!-- HDR calibration tip — only shown on HDR-capable displays -->
     <div id="hdrInfoBar" class="hdr-info-bar" style="display:none;">
         <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#1bc174" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><polyline points="20 6 9 17 4 12"/></svg>
-        <span><strong>HDR output detected</strong> — for accurate brightness <span class="hdr-info-path-tip"><strong style="color:#fffd00;">set your Windows SDR brightness slider to 31% (203 nits)</strong><span class="hdr-info-path-tooltip"><strong><span class="hdr-info-path-tooltip-text">Settings → System → Display → HDR</span><img class="hdr-info-path-tooltip-img" src="images/win_sdr_slider.jpg" alt="Windows SDR brightness slider location"></span></span></span>
+        <span><strong>HDR output detected</strong> — for accurate browser brightness <span class="hdr-info-path-tip"><strong style="color:#ffd424;">set your Windows SDR brightness slider to 31% (203 nits)</strong><span class="hdr-info-path-tooltip"><strong><span class="hdr-info-path-tooltip-text">Settings → System → Display → HDR</span><img class="hdr-info-path-tooltip-img" src="images/win_sdr_slider.jpg" alt="Windows SDR brightness slider location"></span></span></span>
     </div>
 
     <!-- SDR warning — shown when HDR is not active -->
@@ -28,17 +28,16 @@
             <div class="drop-zone" id="dropZone">
                 <div style="display:flex;flex-direction:column;align-items:center;gap:6px;">
                     <span class="material-symbols-outlined drop-zone-icon">add_photo_alternate</span>
-                    <p class="drop-zone-text" style="margin:0;">Drop Images or Click Here</p>
+                    <p class="drop-zone-text" style="margin:0;">Drop HDR Images or Click Here</p>
                     <p class="drop-zone-formats" style="margin:0;">.png .avif .jxr .exr .hdr</p>
                 </div>
             </div>
             <input id="fileInput" type="file" multiple accept=".png,.avif,.jxr,.exr,.hdr" aria-label="Select HDR image files" style="display:none;" />
         </div>
-        <div id="filterBar" class="filter-bar"></div>
         <div id="statusMessage" class="status-message"></div>
-        <div class="gallery-section-header">
-          <!--  <span class="gallery-section-title">Latest uploads</span> -->
-        </div>
+        
+        <div id="filterBar" class="filter-bar"></div>
+        <div class="gallery-section-header"></div>
         <div id="gallery" class="gallery"></div>
     </div>
 

@@ -11,10 +11,10 @@
     align-items: center;
     justify-content: center;
     gap: 6px;
-    padding: 9px 16px;
+    padding: 6px 16px;
     background: rgba(43, 108, 255, 0.12);
     border-bottom: 1px solid rgba(43, 108, 255, 0.25);
-    font-size: 13px;
+    font-size: 12px;
     color: #bbb;
     line-height: 1.4;
     overflow: visible;
@@ -23,7 +23,7 @@
 }
 
 .hdr-info-bar strong {
-    color: #00ff2b;
+    color: #00ff86;
 }
 
 /* SDR warning overrides — more prominent red tint */
@@ -152,7 +152,7 @@ html, body {
 
 body {
     font-family: var(--bs-body-font-family);
-    background: #0f0f0f;
+    background: #030303;
     color: #eee;
     text-align: center;
 }
@@ -347,7 +347,7 @@ h1 {
     max-width: 800px;
     margin: 0 auto 12px;
     width: 100%;
-    text-align: left;
+    text-align: center;
 }
 
 .gallery-section-title {
@@ -359,10 +359,126 @@ h1 {
     white-space: nowrap;
 }
 
+/* ─── Game Banner Header (shown when a game is filtered) ─────────────────── */
+
+.game-banner-header {
+    position: relative;
+    width: 100%;
+    height: 110px;
+    border-radius: 10px;
+    overflow: hidden;
+    background-color: #100820;
+    background-size: cover;
+    background-position: center 25%;
+    display: flex;
+    align-items: flex-end;
+    padding: 14px 18px;
+    box-sizing: border-box;
+    transition: background-image 0.3s ease;
+}
+
+.game-banner-overlay {
+    position: absolute;
+    inset: 0;
+    background:
+        linear-gradient(to right,  rgba(0,0,0,0.88) 0%, rgba(0,0,0,0.55) 50%, rgba(0,0,0,0.18) 100%),
+        linear-gradient(to top,    rgba(0,0,0,0.75) 0%, transparent 65%);
+}
+
+.game-banner-title {
+    position: relative;
+    z-index: 1;
+    font-size: 20px;
+    font-weight: 800;
+    color: #fff;
+    letter-spacing: 0.01em;
+    line-height: 1.1;
+    text-shadow:
+        0 0 24px rgba(180, 130, 255, 0.55),
+        0 0  8px rgba(120,  80, 200, 0.35),
+        0 2px 6px rgba(0, 0, 0, 0.9);
+    /* Shimmer animation on load */
+    animation: banner-title-in 0.4s ease both;
+}
+
+@keyframes banner-title-in {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0);   }
+}
+
+.game-banner-close {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.45);
+    color: rgba(255, 255, 255, 0.7);
+    cursor: pointer;
+    line-height: 1;
+    transform: none;
+    box-shadow: none;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+.game-banner-close:hover {
+    background: rgba(0, 0, 0, 0.7);
+    color: #fff;
+    transform: none;
+    box-shadow: none;
+}
+
+.game-banner-close:active {
+    transform: none;
+    box-shadow: none;
+}
+
+.game-banner-close svg {
+    display: block;
+    flex-shrink: 0;
+    margin: 0;
+}
+
+/* Subtle scanline texture over the whole banner */
+.game-banner-header::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 3px,
+        rgba(0,0,0,0.06) 3px,
+        rgba(0,0,0,0.06) 4px
+    );
+    pointer-events: none;
+    z-index: 0;
+}
+
+/* Skeleton shimmer while image loads */
+.game-banner-header.banner-loading {
+    background-image: none !important;
+    background: linear-gradient(90deg, #1a0d2e 25%, #2a1545 50%, #1a0d2e 75%);
+    background-size: 200% 100%;
+    animation: banner-skeleton 1.4s ease infinite;
+}
+
+@keyframes banner-skeleton {
+    0%   { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+}
+
 .gallery {
     display: flex;
     flex-direction: column;
-    gap: 20px;
+    gap: 8px;
     align-items: stretch;
     max-width: 800px;
     margin: 0 auto;
@@ -740,23 +856,16 @@ button.button-active:active {
 
 /* Circular drag handle on the divider */
 .inline-comparison-divider::before {
-    content: '⟷';
+    content: '';
     position: absolute;
     top: 50%;
     left: 50%;
     transform: translate(-50%, -50%);
     width: 40px;
     height: 40px;
-    background: #fff;
+    background: #fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='%23333' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 12H3'/%3E%3Cpath d='m7 8-4 4 4 4'/%3E%3Cpath d='m17 8 4 4-4 4'/%3E%3C/svg%3E") center/20px no-repeat;
     border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 18px;
-    color: #333;
     box-shadow: 0 2px 8px rgba(0,0,0,0.4);
-    line-height: 40px;
-    text-align: center;
 }
 
 .inline-comparison-label {
@@ -830,25 +939,20 @@ button.button-active:active {
     cursor: grabbing !important;
 }
 
-/* Text elements keep the standard text cursor, not grab */
-.imo-panel .imo-label,
-.imo-panel .imo-value,
-.imo-panel .imo-pct {
-    cursor: text;
-}
+/* Text elements keep the standard cursor — panel is draggable from anywhere */
 
 .imo-panel-single {
     min-width: 180px;
-    max-width: 240px;
+    max-width: 300px;
     width: fit-content;
-    max-height: calc(100% - 16px);
+    max-height: calc(100dvh - 180px); /* JS overrides this with exact available space */
     overflow-y: auto;
     scrollbar-width: thin;
     scrollbar-color: #444 transparent;
 }
 
 .imo-section-title {
-    font-size: 10px;
+    font-size: 12px;
     font-weight: 700;
     letter-spacing: 0.07em;
     text-transform: uppercase;
@@ -859,18 +963,18 @@ button.button-active:active {
 
 .imo-row {
     display: grid;
-    grid-template-columns: 60px 1fr;
+    grid-template-columns: 72px 1fr;
     gap: 0 6px;
     padding: 1px 0;
     border-bottom: 1px solid rgba(255,255,255,0.06);
-    font-size: 11.5px;
+    font-size: 13.5px;
 }
 
 .imo-row:last-child { border-bottom: none; }
 
 /* Gamut rows have a third column for the percentage value */
 .imo-gamut-row {
-    grid-template-columns: 52px 1fr 54px;
+    grid-template-columns: 62px 1fr 60px;
     align-items: center;
     gap: 0 8px;
 }
@@ -893,7 +997,7 @@ button.button-active:active {
 
 .imo-pct {
     color: #eee;
-    font-size: 11.5px;
+    font-size: 13.5px;
     text-align: right;
     white-space: nowrap;
 }
@@ -938,10 +1042,234 @@ button.button-active:active {
     width: 100%;
 }
 
+.filter-bar-inner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    max-width: 560px;
+}
+
 .gallery-search-wrap {
     position: relative;
+    flex: 1;
+    min-width: 0;
+}
+
+/* ─── View Toggle Buttons ───────────────────────────────────────────────────── */
+
+.view-toggle {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    background: #1a1a1a;
+    border: 1px solid #383838;
+    border-radius: 8px;
+    padding: 3px;
+    flex-shrink: 0;
+}
+
+.view-toggle-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    border-radius: 5px;
+    border: none;
+    background: transparent;
+    color: #666;
+    cursor: pointer;
+    padding: 0;
+    transition: background 0.15s ease, color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+    will-change: transform;
+}
+
+.view-toggle-btn svg {
+    margin: 0;
+    display: block;
+    flex-shrink: 0;
+}
+
+.view-toggle-btn:hover {
+    background: #2a2a2a;
+    color: #bbb;
+    transform: none;
+    box-shadow: none;
+}
+
+.view-toggle-btn:active {
+    transform: none;
+    box-shadow: none;
+}
+
+.view-toggle-btn:focus-visible {
+    outline: 2px solid #5a8fff;
+    outline-offset: 1px;
+}
+
+.view-toggle-btn.active {
+    background: #2b6cff;
+    color: #fff;
+    transform: none;
+    box-shadow: none;
+}
+
+.view-toggle-btn.active:hover {
+    background: #1e5ae6;
+    transform: none;
+    box-shadow: none;
+}
+
+/* ─── Latest Uploads title ────────────────────────────────────────────────────── */
+
+.gallery-section-title {
+    display: block;
+    font-size: 12px;
+    font-weight: 600;
+    color: #dddddd;
+    letter-spacing: 0.05em;
+    text-transform: capitalize;
+    max-width: 800px;
+    margin: 0 auto;
     width: 100%;
-    max-width: 480px;
+}
+
+/* ─── 2-Column & 3-Column Grid Modes ──────────────────────────────────────────── */
+
+/* grid2/grid3 outer: single column, centered — inner grid handles columns */
+.gallery.gallery-grid2-mode,
+.gallery.gallery-grid3-mode {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    max-width: 800px;
+}
+
+.gallery.gallery-grid2-mode .collage-card,
+.gallery.gallery-grid3-mode .collage-card {
+    max-width: 800px;
+    width: 100%;
+    margin: 0;
+}
+
+.gallery.gallery-grid3-mode .collage-title {
+    font-size: 11px;
+}
+
+.gallery.gallery-grid3-mode .collage-header {
+    padding: 6px 8px 5px;
+}
+
+/* Inner grid for game-grouped cards */
+.collage-grid-game {
+    grid-auto-rows: auto;
+    justify-items: center;
+}
+
+.collage-grid-game-2 {
+    grid-template-columns: 1fr 1fr;
+}
+
+.collage-grid-game-3 {
+    grid-template-columns: 1fr 1fr 1fr;
+}
+
+/* If the last image is alone on a row, center it */
+.collage-grid-game-2 .collage-cell:last-child:nth-child(odd),
+.collage-grid-game-3 .collage-cell:last-child:nth-child(3n+1),
+.collage-grid-game-3 .collage-cell:last-child:nth-child(3n+2) {
+    grid-column: 1 / -1;
+    width: 33%;
+}
+.collage-grid-game-2 .collage-cell:last-child:nth-child(odd) {
+    width: 50%;
+}
+
+/* ─── List View Mode ────────────────────────────────────────────────────────── */
+
+.gallery.gallery-list-mode {
+    gap: 8px;
+}
+
+/* Cards are invisible wrappers in list mode — no background, no border, no gap */
+.gallery.gallery-list-mode .collage-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    border-radius: 0;
+    overflow: visible;
+    background: transparent;
+    border: none;
+}
+
+/* Grid stacks images with a consistent gap between every one */
+.gallery.gallery-list-mode .collage-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+/* Each image cell is its own rounded card */
+.gallery.gallery-list-mode .collage-cell {
+    border-radius: 10px;
+    box-shadow: none;
+    overflow: hidden;
+}
+
+.gallery.gallery-list-mode .collage-thumb {
+    width: 100%;
+    height: auto;
+    display: block;
+    object-fit: contain;
+    background: #0a0a0a;
+    border-radius: 10px;
+}
+
+
+.gallery.gallery-list-mode .collage-hdr-type {
+    display: none;
+}
+
+/* Image count badge — hidden in batch view, shown in list view in right column */
+.collage-title-count-badge {
+    display: none;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 4px;
+    font-size: 11px;
+    font-weight: 500;
+    color: #54ff6b;
+    white-space: nowrap;
+}
+
+.collage-title-count-badge svg {
+    display: inline-block;
+    vertical-align: middle;
+    flex-shrink: 0;
+    margin: 0;
+}
+
+.gallery.gallery-list-mode .collage-title-count-badge {
+    display: flex;
+}
+
+/* Each image gets its own mini-header in list mode */
+.collage-cell-list-label {
+    display: none;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 10px;
+    background: #111;
+    border-top: 1px solid #222;
+    font-size: 11px;
+    color: #555;
+    font-family: var(--bs-body-font-family);
+}
+
+.gallery.gallery-list-mode .collage-cell-list-label {
+    display: flex;
 }
 
 .gallery-search-field {
@@ -1014,8 +1342,8 @@ button.button-active:active {
     z-index: 200;
     display: none;
     flex-direction: column;
-    background: #2c3034;
-    border: 1px solid #2e2e2e;
+    background: #1a1a1a;
+    border: 1px solid #333;
     border-radius: 8px;
     box-shadow: 0 10px 30px rgba(0,0,0,0.75);
     overflow: hidden;
@@ -1027,9 +1355,9 @@ button.button-active:active {
     padding: 9px 14px;
     font-size: 16px;
     font-weight: 400;
-    color: #e1e1e1;
+    color: #ccc;
     cursor: pointer;
-    border-bottom: 1px solid #222;
+    border-bottom: 1px solid #252525;
     transition: background 0.1s ease, color 0.1s ease;
     text-align: left;
     display: flex;
@@ -1052,8 +1380,8 @@ button.button-active:active {
 }
 
 .gallery-search-suggestion:hover {
-    background: #5a5a5a;
-    color: #c9c9c9;
+    background: #252525;
+    color: #fff;
 }
 .gallery-search-suggestion-highlighted {
     background: #1a3a8a;
@@ -1086,7 +1414,11 @@ button.button-active:active {
     border-radius: 10px;
     width: 420px;
     max-width: calc(100vw - 32px);
+    max-height: calc(100dvh - 32px);
     box-shadow: 0 24px 64px rgba(0, 0, 0, 0.7);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
 }
 
 .modal-header {
@@ -1095,6 +1427,7 @@ button.button-active:active {
     display: flex;
     flex-direction: column;
     gap: 2px;
+    flex-shrink: 0;
 }
 
 .modal-title {
@@ -1208,6 +1541,12 @@ button.button-active:active {
 
 .modal-body {
     padding: 10px 16px;
+    overflow-y: auto;
+    flex: 1 1 auto;
+    min-height: 0;
+    scrollbar-width: thin;
+    scrollbar-color: #333 transparent;
+    overscroll-behavior: contain;
 }
 
 .modal-section-label {
@@ -1281,6 +1620,7 @@ button.button-active:active {
     box-shadow: 0 8px 24px rgba(0,0,0,0.7);
     max-height: 260px;
     overflow-y: auto;
+    user-select: none;
 }
 
 .hdr-custom-group-header {
@@ -1301,6 +1641,7 @@ button.button-active:active {
     border-bottom: 1px solid #252525;
     transition: background 0.1s ease, color 0.1s ease;
     text-align: left;
+    user-select: none;
 }
 .hdr-custom-item:last-child { border-bottom: none; }
 .hdr-custom-item:hover { background: #252525; color: #fff; }
@@ -1330,6 +1671,14 @@ button.button-active:active {
 .game-search-row:focus-within {
     border-color: #5865f2;
     border-width: 2px;
+}
+
+/* When the HDR dropdown is open, suppress the blue border on the game name row.
+   The search input stays focused by design (blurring it would collapse the results
+   dropdown via a stacking-context reflow), so we cancel the highlight explicitly. */
+.modal:has(.hdr-trigger-open) .game-search-row:focus-within:not(.modal-select-row) {
+    border-color: #3a3a3a;
+    border-width: 1px;
 }
 
 .game-search-icon {
@@ -1386,7 +1735,7 @@ button.button-active:active {
 }
 
 .game-result-item:hover {
-    background: #1a1a1a;
+    background: #252525;
     color: #fff;
 }
 .game-result-item-highlighted {
@@ -1499,6 +1848,7 @@ button.button-active:active {
     display: flex;
     justify-content: flex-end;
     gap: 8px;
+    flex-shrink: 0;
 }
 
 .modal-import {
@@ -1536,6 +1886,11 @@ button.button-active:active {
     align-items: center;
     padding: 10px 12px 8px;
     gap: 8px;
+}
+
+.gallery.gallery-list-mode .collage-header,
+.gallery.gallery-filtered .collage-header {
+    display: none;
 }
 
 .collage-hdr-type {
@@ -1579,6 +1934,18 @@ button.button-active:active {
     grid-column: 2;
 }
 
+.collage-title-link {
+    pointer-events: auto;
+    cursor: pointer;
+    transition: color 0.15s ease;
+}
+
+.collage-title-link:hover {
+    color: #fff;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+}
+
 .collage-title-count {
     display: inline-flex;
     align-items: center;
@@ -1616,9 +1983,9 @@ button.button-active:active {
 
 .collage-grid {
     display: grid;
-    gap: 4px;
+    gap: 2px;
     width: 100%;
-    padding: 4px;
+    padding: 2px;
 }
 
 /* 1 image */
@@ -1781,13 +2148,13 @@ button.button-active:active {
 .lightbox-overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.92);
+    background: rgba(0, 0, 0, 0.99);
     z-index: 2000;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: flex-start;
-    padding-top: 64px;
+    padding-top: 12px;
     gap: 0;
     opacity: 0;
     transition: opacity 450ms cubic-bezier(0.2, 0, 0, 1);
@@ -1800,6 +2167,7 @@ button.button-active:active {
 
 .lightbox-image-area {
     flex: 1;
+    min-height: 0;
     width: 100%;
     display: flex;
     align-items: center;
@@ -1807,8 +2175,8 @@ button.button-active:active {
     flex-direction: column;
     overflow: hidden;
     position: relative;
-    max-height: calc(100vh - 48px - 80px - 64px);
     box-sizing: border-box;
+    touch-action: none; /* JS handles all touch gestures */
 }
 
 .lightbox-image-wrapper {
@@ -1832,7 +2200,7 @@ button.button-active:active {
 
 .lightbox-image {
     max-width: calc(100vw - 120px);
-    max-height: calc(100vh - 48px - 80px - 64px - 44px - 8px);
+    max-height: calc(100vh - 12px - 52px - 72px - 44px - 8px);
     object-fit: contain;
     display: block;
     cursor: zoom-in;
@@ -1873,27 +2241,109 @@ button.button-active:active {
     overflow: visible;
 }
 
-/* Inner wrapper — width is kept in sync with the rendered image by a ResizeObserver in script.js.
-   The fallback (calc) applies only before the first ResizeObserver tick. */
+/* Inner wrapper — always centered, no left/right split */
 .lightbox-toolbar-inner {
-    width: calc(100vw - 120px);
-    max-width: 100%;
     display: flex;
     align-items: center;
+    justify-content: center;
     gap: 6px;
     overflow: visible;
+    width: auto;
+    max-width: 100%;
 }
 
-/* Compact mode — toggled by JS when buttons overflow their measured width */
-.lightbox-toolbar-inner.toolbar-compact .btn-label {
+/* Labels always hidden — icon-only buttons */
+.lightbox-toolbar-inner .btn-label {
     display: none;
 }
 
-.lightbox-toolbar-inner.toolbar-compact button {
+/* SDR/HDR toggle label — always visible, no icon */
+.sdr-toggle-mode-label {
+    display: inline;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+}
+
+/* SDR ↔ HDR pill toggle */
+.sdr-pill-toggle {
+    display: inline-flex;
+    align-items: center;
+    background: #1a1a20;
+    border: 1px solid #444;
+    border-radius: 6px;
+    cursor: pointer;
+    flex-shrink: 0;
+    height: 28px;
+    position: relative;
+    padding: 2px;
+    gap: 0;
+}
+
+/* Sliding highlight indicator */
+.sdr-pill-toggle::before {
+    content: '';
+    position: absolute;
+    top: 2px;
+    bottom: 2px;
+    width: calc(50% - 2px);
+    border-radius: 4px;
+    background: linear-gradient(135deg, #f5c518 0%, #e8a800 100%);
+    box-shadow: 0 0 8px rgba(245, 197, 24, 0.55), 0 0 2px rgba(245, 197, 24, 0.3);
+    transition: transform 0.22s cubic-bezier(0.34, 1.3, 0.64, 1), background 0.15s ease;
+    left: 2px;
+    transform: translateX(calc(100%));
+    pointer-events: none;
+}
+
+/* When SDR is active, slide indicator to the left */
+.sdr-pill-toggle.sdr-active::before {
+    transform: translateX(0);
+    background: #4a5060;
+    box-shadow: 0 0 6px rgba(74, 80, 96, 0.3);
+}
+
+.sdr-pill-seg {
+    position: relative;
+    z-index: 1;
+    padding: 0 9px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    color: #666;
+    line-height: 24px;
+    flex: 1;
+    text-align: center;
+    user-select: none;
+    transition: color 0.18s ease;
+}
+
+.sdr-pill-seg--active {
+    color: #fff;
+}
+
+/* When HDR is active (not sdr-active), the active seg sits on gold — use dark text */
+.sdr-pill-toggle:not(.sdr-active) .sdr-pill-seg--active {
+    color: #1a1200;
+}
+
+.sdr-pill-toggle:hover .sdr-pill-seg:not(.sdr-pill-seg--active) {
+    color: #aaa;
+}
+
+.sdr-pill-toggle:not(.sdr-active):active::before {
+    transform: translateX(calc(100%)) scaleX(0.95);
+}
+
+.sdr-pill-toggle.sdr-active:active::before {
+    transform: translateX(0) scaleX(0.95);
+}
+
+.lightbox-toolbar-inner button {
     padding: 6px 8px;
 }
 
-.lightbox-toolbar-inner.toolbar-compact button svg {
+.lightbox-toolbar-inner button svg {
     margin-right: 0;
 }
 
@@ -1902,9 +2352,7 @@ button.button-active:active {
     gap: 6px;
     align-items: center;
     flex-wrap: nowrap;
-    flex: 1;
     overflow: visible;
-    min-width: 0;
 }
 
 /* Prevent individual button text from wrapping onto a second line */
@@ -1912,15 +2360,49 @@ button.button-active:active {
     white-space: nowrap;
 }
 
+.toolbar-separator {
+    width: 1px;
+    height: 20px;
+    background: #333;
+    flex-shrink: 0;
+    margin: 0 2px;
+}
+
 .lightbox-toolbar-right {
     display: flex;
     gap: 6px;
     align-items: center;
     flex-wrap: nowrap;
-    justify-content: flex-end;
-    flex: 1;
     overflow: visible;
-    min-width: 0;
+}
+
+/* ── Toolbar button tooltip ── */
+.lightbox-toolbar button[data-tooltip] {
+    position: relative;
+}
+
+.lightbox-toolbar button[data-tooltip]::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 50%;
+    transform: translateX(-50%);
+    background: #1e1e1e;
+    color: #e0e0e0;
+    font-size: 11px;
+    font-family: inherit;
+    white-space: nowrap;
+    padding: 4px 8px;
+    border-radius: 5px;
+    border: 1px solid #333;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+    z-index: 9999;
+}
+
+.lightbox-toolbar button[data-tooltip]:hover::after {
+    opacity: 1;
 }
 
 /* Hide text labels on narrow screens — buttons become icon-only with title tooltips */
@@ -1940,13 +2422,13 @@ button.button-active:active {
     /* Tighten vertical layout on small screens */
     .lightbox-overlay {
         padding-top: 0;
-        justify-content: center;
+        justify-content: flex-start;
     }
 
     .lightbox-image-area {
-        /* Don't expand — size to content so toolbar follows image */
-        flex: 0 0 auto;
-        max-height: calc(100svh - 52px - 56px - 44px - 8px);
+        flex: 1;
+        min-height: 0;
+        max-height: none;
         overflow: hidden;
     }
 
@@ -2021,6 +2503,17 @@ button.button-active:active {
     text-align: center;
 }
 
+.lightbox-image-header-title--link {
+    cursor: pointer;
+    pointer-events: auto;
+}
+
+.lightbox-image-header-title--link:hover {
+    color: #fff;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+}
+
 
 
 /* Lightbox SDR comparison slider — absolutely overlays the rendered image, no layout disruption */
@@ -2037,7 +2530,7 @@ button.button-active:active {
 }
 
 .lightbox-comparison-slider .inline-comparison-sdr {
-    object-fit: fill;
+    object-fit: contain;
     width: 100%;
     height: 100%;
 }
@@ -2050,13 +2543,16 @@ button.button-active:active {
     flex-shrink: 0;
     display: flex;
     align-items: center;
-    justify-content: center;
+    justify-content: safe center;
     gap: 4px;
     padding: 6px 12px;
     background: #0d0d0d;
     overflow-x: auto;
+    overscroll-behavior-x: contain;
     scrollbar-width: thin;
     scrollbar-color: #333 transparent;
+    touch-action: pan-x; /* allow horizontal swipe-scroll of thumbnails */
+    -webkit-overflow-scrolling: touch;
 }
 
 
@@ -2182,7 +2678,7 @@ button.button-active:active {
     font-weight: 700;
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    color: #e4e4e4;
+    color: #50b1f6;
 }
 /* ─── Nit Tooltip ────────────────────────────────────────────────────────────── */
 
@@ -2242,7 +2738,7 @@ button.button-active:active {
 .imo-section-title--hdr       { color: #2b6cff; margin-top: 8px; }
 .imo-section-title--luminance { color: #51cf66; margin-top: 8px; }
 .imo-section-title--gamut     { color: #a78bfa; margin-top: 8px; }
-.imo-row--unavailable         { color: #666; font-size: 11px; }
+.imo-row--unavailable         { color: #666; font-size: 13px; }
 /* ── Additional Info ────────────────────────────────────────────────────────── */
 .modal-section-label-info {
     margin-top: 10px;
@@ -2283,4 +2779,115 @@ button.button-active:active {
     text-overflow: ellipsis;
     text-align: center;
     max-width: 100%;
+}
+
+.collage-title-count-badge svg {
+    display: inline-block;
+    vertical-align: middle;
+    flex-shrink: 0;
+    margin: 0;
+    width: 14px;
+    height: 14px;
+}
+
+/* ─── Responsive Modal Heights ───────────────────────────────────────────────── */
+
+/* Short viewports (e.g. 768×600 or a browser window that's been resized down) */
+@media (max-height: 700px) {
+    .modal {
+        max-height: calc(100dvh - 24px);
+        border-radius: 8px;
+    }
+
+    .modal-header {
+        padding: 8px 14px 6px;
+    }
+
+    .modal-body {
+        padding: 8px 14px;
+    }
+
+    .modal-footer {
+        padding: 6px 14px 8px;
+    }
+
+    /* Shrink the thumbnail in upload modals so it doesn't eat screen space */
+    .modal-thumb {
+        max-height: 56px;
+    }
+
+    /* Compress file list height */
+    .modal-file-list {
+        max-height: 72px;
+    }
+}
+
+/* Very short viewports (landscape phone, tiny window) */
+@media (max-height: 480px) {
+    .modal {
+        max-height: calc(100dvh - 16px);
+        border-radius: 6px;
+    }
+
+    .modal-header {
+        padding: 6px 12px 5px;
+    }
+
+    .modal-title {
+        font-size: 12px;
+    }
+
+    .modal-subtitle {
+        font-size: 10px;
+    }
+
+    .modal-body {
+        padding: 6px 12px;
+    }
+
+    .modal-footer {
+        padding: 5px 12px 6px;
+    }
+
+    .modal-thumb {
+        max-height: 40px;
+    }
+
+    .modal-file-list {
+        max-height: 52px;
+    }
+
+    .hdr-type-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* ─── Responsive IMO (Analysis) Panels ───────────────────────────────────────── */
+
+/* On short viewports the metadata panels can overflow the image area */
+@media (max-height: 700px) {
+    .imo-panel-single {
+        max-height: calc(100dvh - 160px);
+        font-size: 12px;
+    }
+
+    .imo-row {
+        font-size: 12px;
+    }
+}
+
+@media (max-height: 480px) {
+    .imo-panel-single {
+        max-height: calc(100dvh - 120px);
+        font-size: 11.5px;
+        padding: 6px 8px;
+    }
+
+    .imo-section-title {
+        font-size: 10.5px;
+    }
+
+    .imo-row {
+        font-size: 11.5px;
+    }
 }

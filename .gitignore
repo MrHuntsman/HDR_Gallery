@@ -1,1 +1,8 @@
-config.js
+admin-instructions.md
+admin.js
+server.js
+firebase.json
+firestore.rules
+cleanup.mjs
+service-account.json
+node_modules/

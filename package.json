@@ -1,0 +1,27 @@
+{
+  "name": "hdr_gallery",
+  "version": "1.0.0",
+  "description": "",
+  "main": "db.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MrHuntsman/HDR_Gallery.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/MrHuntsman/HDR_Gallery/issues"
+  },
+  "homepage": "https://github.com/MrHuntsman/HDR_Gallery#readme",
+  "dependencies": {
+    "cloudinary": "^2.9.0",
+    "express": "^5.2.1",
+    "firebase-admin": "^13.7.0"
+  }
+}

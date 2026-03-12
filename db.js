@@ -43,25 +43,6 @@ const _CLOUD  = 'djwytlx4j';
 const _PRESET = 'hdr-gallery';
 const _UP_URL = `https://api.cloudinary.com/v1_1/${_CLOUD}/auto/upload`;
 
-async function _compressToJpeg(blob, quality = 0.92) {
-    const url = URL.createObjectURL(blob);
-    try {
-        const img = await new Promise((res, rej) => {
-            const i = new Image();
-            i.onload = () => res(i);
-            i.onerror = rej;
-            i.src = url;
-        });
-        const canvas = document.createElement('canvas');
-        canvas.width  = img.naturalWidth;
-        canvas.height = img.naturalHeight;
-        canvas.getContext('2d').drawImage(img, 0, 0);
-        return await new Promise(res => canvas.toBlob(res, 'image/jpeg', quality));
-    } finally {
-        URL.revokeObjectURL(url);
-    }
-}
-
 async function _uploadBlob(blob, filename) {
     if (!blob) return { url: null, publicId: null };
     const fd = new FormData();
@@ -90,14 +71,14 @@ async function addImageFile(file, metadata = null, sdrBlob = null, hdrType = nul
 
     const [hdr, sdr, thumb] = await Promise.all([
         _uploadBlob(file,      file.name),
+        _uploadBlob(sdrBlob, sdrBlob?.name ?? null),
         (async () => {
-            if (!sdrBlob) return { url: null, publicId: null };
-            // Recompress SDR to JPEG to stay within Cloudinary's 10 MB free-tier limit.
-            // Quality 0.92 is visually lossless for an SDR preview image.
-            const compressed = await _compressToJpeg(sdrBlob, 0.92);
-            return _uploadBlob(compressed, base + '_sdr.jpg');
+            if (!thumbBlob) return { url: null, publicId: null };
+            const thumbExt = thumbBlob.type === 'image/avif' ? '.avif'
+                           : thumbBlob.type === 'image/png'  ? '.png'
+                           : '.webp';
+            return _uploadBlob(thumbBlob, base + '_thumb' + thumbExt);
         })(),
-        _uploadBlob(thumbBlob, base + '_thumb.webp'),
     ]);
 
     const ref = await _col.add({
@@ -137,8 +118,6 @@ async function getImageFile(id) {
 }
 
 async function deleteImageFile(id) {
-    // Note: Cloudinary blobs are not deleted here — they can be cleaned up via
-    // the Cloudinary dashboard. Client-side deletion requires a signed request.
     await _col.doc(id).delete();
 }
 
