@@ -1225,15 +1225,6 @@ function openLightbox(batchItems, startIndex) {
     deleteBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg><span class="btn-label"> Delete</span>';
     toolbarRight.appendChild(deleteBtn);
 
-    const deleteAllBtn = document.createElement('button');
-    deleteAllBtn.className = 'button-danger';
-    deleteAllBtn.title = 'Delete all in batch';
-    deleteAllBtn.dataset.tooltip = 'Delete All';
-    deleteAllBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg><span class="btn-label"> Delete All</span>';
-    // Only show if batch has more than one image
-    deleteAllBtn.style.display = lightboxBatch.length > 1 ? '' : 'none';
-    toolbarRight.appendChild(deleteAllBtn);
-
     // ── Hold-to-zoom ──
     let isZooming = false;
     let currentZoomScale = CONFIG.zoomScale;
@@ -2043,12 +2034,10 @@ function openLightbox(batchItems, startIndex) {
         editBtn.style.display       = 'none';
         sep2.style.display          = 'none';
         deleteBtn.style.display     = 'none';
-        deleteAllBtn.style.display  = 'none';
         isCurrentUserOwner(item).then(isOwner => {
             editBtn.style.display      = isOwner ? '' : 'none';
             sep2.style.display         = isOwner ? '' : 'none';
             deleteBtn.style.display    = isOwner ? '' : 'none';
-            deleteAllBtn.style.display = isOwner && lightboxBatch.length > 1 ? '' : 'none';
         });
 
         // Start pixel decode only if analysis tool is active
@@ -2123,19 +2112,6 @@ function openLightbox(batchItems, startIndex) {
                 renderLightboxImage();
                 await refreshGallery();
             } catch (err) { console.error('Delete error:', err); }
-        };
-
-        deleteAllBtn.onclick = async () => {
-            const count = lightboxBatch.length;
-            const gameName = lightboxBatch[0]?.gameName || 'this batch';
-            if (!confirm(`Delete all ${count} image${count === 1 ? '' : 's'} from "${gameName}"?`)) return;
-            try {
-                const ids = lightboxBatch.map(b => b.id);
-                await deleteBatchImageFiles(ids);
-                ids.forEach(id => { lightboxPixelBuffers.delete(id); });
-                closeLightbox();
-                await refreshGallery();
-            } catch (err) { console.error('Delete all error:', err); }
         };
 
         compareBtn.onclick = (e) => {
