@@ -233,7 +233,7 @@ cursorTooltip.appendChild(_nitsRow);
 // ─── Nit tooltip HTML helpers ─────────────────────────────────────────────────
 function _nitTooltipHTML(rNits, gNits, bNits, luminance, gamut) {
     const fmt = v => v < 10 ? v.toFixed(2) : Math.round(v);
-    const gamutClass = gamut === 'BT.2020' ? 'nit-grid__gamut--2020' : gamut === 'DCI-P3' ? 'nit-grid__gamut--p3' : 'nit-grid__gamut--709';
+    const gamutClass = gamut === 'SDR' ? 'nit-grid__gamut--sdr' : gamut === 'BT.2020' ? 'nit-grid__gamut--2020' : gamut === 'DCI-P3' ? 'nit-grid__gamut--p3' : 'nit-grid__gamut--709';
     return `<div class="nit-grid"><span>Nits</span><span>:</span><span class="nit-grid__val">${fmt(luminance)}</span><span class="nit-grid__r">R</span><span class="nit-grid__r">:</span><span class="nit-grid__val nit-grid__r">${fmt(rNits)}</span><span class="nit-grid__g">G</span><span class="nit-grid__g">:</span><span class="nit-grid__val nit-grid__g">${fmt(gNits)}</span><span class="nit-grid__b">B</span><span class="nit-grid__b">:</span><span class="nit-grid__val nit-grid__b">${fmt(bNits)}</span><span class="nit-grid__gamut ${gamutClass}">${gamut}</span></div>`;
 }
 const _NIT_LOADING_HTML = `<div class="nit-loading"><svg class="nit-loading__spinner" xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg><span class="nit-loading__text">Reading pixel data…</span></div>`;
@@ -318,9 +318,8 @@ function toggleGlobalDetailsMode() {
     updateAllDetailButtons(globalDetailsEnabled);
 
     if (globalDetailsEnabled) {
-        // If lightbox is open, cancel SDR slider first (mutually exclusive)
+        // If lightbox is open, cancel SDR slider first (mutually exclusive with slider only)
         if (lightboxOpen && lightboxSdrActive) {
-            // Find the active SDR Slider button and click it — reuses its own teardown logic
             const sdrSliderBtn = Array.from(document.querySelectorAll('.lightbox-toolbar button'))
                 .find(b => b.classList.contains('button-active') && b.textContent.includes('SDR'));
             if (sdrSliderBtn) sdrSliderBtn.click();
@@ -331,14 +330,36 @@ function toggleGlobalDetailsMode() {
             if (imgEl) imgEl.classList.add('cursor-nit-hunt');
             const container = document.querySelector('.lightbox-image-container');
             if (container) container.classList.add('cursor-nit-hunt');
-            // Kick off decode for the current image now that analysis tool is on
             const currentItem = lightboxBatch[lightboxIndex];
-            if (currentItem) _startPixelDecode(currentItem);
-            if (currentVisibleImage) showDetailsForImage(currentVisibleImage);
-            // If cursor is already over the image, show nit tooltip immediately
-            const imgElActive = document.querySelector('.lightbox-image');
-            if (imgElActive && imgElActive.matches(':hover')) {
-                imgElActive.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false }));
+            if (currentItem) {
+                if (lightboxSdrToggleActive) {
+                    // In SDR toggle mode — decode SDR buffer and show SDR metadata panel
+                    _startSdrPixelDecode(currentItem);
+                    if (currentVisibleImage) {
+                        const imageData = imageWrappers.get(currentVisibleImage);
+                        if (imageData) {
+                            const existing = imageData.wrapper.querySelector('.image-meta-overlay');
+                            if (existing) existing.remove();
+                            _showSdrMetadataOverlay(currentItem, imageData.wrapper);
+                        }
+                    }
+                    lightboxSdrPixelBuffers.get(currentItem.id)?.then(buf => {
+                        if (lightboxSdrToggleActive && globalDetailsEnabled) {
+                            // find the lbPixelBuffer closure via imageWrappers isn't accessible here,
+                            // so we dispatch a synthetic mouseenter to re-prime the tooltip
+                            const imgElActive = document.querySelector('.lightbox-image');
+                            if (imgElActive) imgElActive.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false }));
+                        }
+                    });
+                } else {
+                    // Normal HDR mode
+                    _startPixelDecode(currentItem);
+                    if (currentVisibleImage) showDetailsForImage(currentVisibleImage);
+                    const imgElActive = document.querySelector('.lightbox-image');
+                    if (imgElActive && imgElActive.matches(':hover')) {
+                        imgElActive.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false }));
+                    }
+                }
             }
         }
     } else {
@@ -432,7 +453,42 @@ function hideAllDetailsOverlays() {
     });
 }
 
-// ─── File Processing ─────────────────────────────────────────────────────────
+// Computes SDR luminance stats (max/avg/min in cd/m²) from an 8-bit sRGB blob.
+// Uses createImageBitmap + OffscreenCanvas so no worker or network fetch is needed —
+// the blob is already in memory at import time.
+async function computeSdrLuminanceStats(sdrBlob) {
+    try {
+        const bitmap = await createImageBitmap(sdrBlob);
+        const { width, height } = bitmap;
+        const canvas = new OffscreenCanvas(width, height);
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(bitmap, 0, 0);
+        bitmap.close();
+        const { data } = ctx.getImageData(0, 0, width, height);
+        const total = width * height;
+        let maxL = 0, sumL = 0, minL = Infinity;
+        for (let i = 0; i < total; i++) {
+            const base = i * 4;
+            const r = _srgbEotf(data[base]     / 255);
+            const g = _srgbEotf(data[base + 1] / 255);
+            const b = _srgbEotf(data[base + 2] / 255);
+            const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            if (lum > maxL) maxL = lum;
+            if (lum < minL) minL = lum;
+            sumL += lum;
+        }
+        return {
+            maxLuminance: maxL,
+            avgLuminance: sumL / total,
+            minLuminance: minL === Infinity ? 0 : minL,
+        };
+    } catch (e) {
+        console.warn('[import] SDR luminance stats failed:', e);
+        return null;
+    }
+}
+
+
 
 async function processFiles(selectedFiles) {
     console.log("[processFiles] v2 running, files:", selectedFiles.map(f => f.name));
@@ -540,11 +596,20 @@ async function processFiles(selectedFiles) {
 
             const thumbBlob = prebuiltThumb;
 
+            // Compute SDR luminance stats from the blob — stored in Firestore so the
+            // analysis panel can render instantly without re-decoding at view time.
+            let sdrLuminanceStats = null;
+            if (sdrBlob) {
+                const _tSdrStats = performance.now();
+                sdrLuminanceStats = await computeSdrLuminanceStats(sdrBlob);
+                _importLog(`computeSdrLuminanceStats: ${hdrFile.name}`, _tSdrStats);
+            }
+
             _progressFileLabel = `Saving: ${hdrFile.name}`;
             _renderProgress();
             const _tSave = performance.now();
             console.log('[processFiles] storing — thumb:', thumbBlob?.size, 'sdr:', sdrBlob?.size);
-            await addImageFile(hdrFile, metadata, sdrBlob, hdrType, batchId, thumbBlob, importGameName, importSpoiler, importAdditionalInfo);
+            await addImageFile(hdrFile, metadata, sdrBlob, hdrType, batchId, thumbBlob, importGameName, importSpoiler, importAdditionalInfo, sdrLuminanceStats);
             _importLog(`addImageFile: ${hdrFile.name}`, _tSave);
         }
         _importLog('total import', _importT0);
@@ -636,6 +701,12 @@ function renderGallery(allItems) {
     });
 
     const filtered = applyFilters(allItems);
+
+    // Update the count badge in the filter bar
+    const _countEl = document.getElementById('filterBarCount');
+    if (_countEl) {
+        _countEl.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>${filtered.length}`;
+    }
     const _isGameGrouped = galleryViewMode === 'grid2' || galleryViewMode === 'grid3';
     const visibleKeys = new Set();
     for (const item of filtered) {
@@ -814,7 +885,8 @@ let lightboxBatch = [];
 let lightboxIndex = 0;
 // _lbOpenTime is set by openLightbox and read by _startPixelDecode for timing logs
 let _lbOpenTime = 0;
-let lightboxPixelBuffers = new Map(); // imageId → buffer promise
+let lightboxPixelBuffers = new Map(); // imageId → buffer promise (HDR)
+let lightboxSdrPixelBuffers = new Map(); // imageId → buffer promise (SDR)
 let lightboxSdrActive = false;
 let lightboxSdrToggleActive = false; // full SDR view (no slider)
 let lightboxBlobUrls = new Map(); // imageId → { url, fullUrl, blob, sdrUrl }
@@ -866,6 +938,52 @@ function _startPixelDecode(item) {
         };
     });
     lightboxPixelBuffers.set(item.id, p);
+}
+
+// Lazily start pixel decode for the SDR version of an item.
+// The SDR file is 8-bit sRGB AVIF — decoded the same way by pixel-worker,
+// but we store it separately so HDR and SDR buffers can coexist.
+function _startSdrPixelDecode(item) {
+    if (lightboxSdrPixelBuffers.has(item.id)) return;
+    const entry = lightboxBlobUrls.get(item.id);
+    if (!entry?.sdrUrl) return;
+    const _t0 = _lbOpenTime || performance.now();
+    const p = new Promise(resolve => {
+        const worker = new Worker('./pixel-worker.js', { type: 'module' });
+        fetch(entry.sdrUrl)
+            .then(r => r.arrayBuffer())
+            .then(ab => worker.postMessage({ arrayBuffer: ab }, [ab]));
+        worker.onmessage = e => {
+            worker.terminate();
+            resolve(e.data.error ? null : e.data);
+        };
+        worker.onerror = () => { worker.terminate(); resolve(null); };
+    });
+    lightboxSdrPixelBuffers.set(item.id, p);
+}
+
+// sRGB EOTF: gamma-encoded [0,1] → linear, then scale to cd/m²
+// SDR reference white = 203 cd/m² (IEC 61966-2-1 / HLG mapping)
+function _srgbEotf(v) {
+    const c = Math.max(0, Math.min(1, v));
+    return (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)) * 203;
+}
+
+// Like getNitsAtPixel but treats the buffer as 8-bit sRGB (SDR tonemap output).
+// The pixel worker scales 8-bit values to 16-bit big-endian, so we divide by 65535.
+function _getNitsAtPixelSdr(pixelBuffer, imgX, imgY) {
+    const { pixels, width, height, samplesPerPixel } = pixelBuffer;
+    const px = Math.max(0, Math.min(width  - 1, Math.floor(imgX)));
+    const py = Math.max(0, Math.min(height - 1, Math.floor(imgY)));
+    const base = (py * width + px) * samplesPerPixel * 2;
+    const r = _srgbEotf((pixels[base]     << 8 | pixels[base + 1]) / 65535);
+    const g = _srgbEotf((pixels[base + 2] << 8 | pixels[base + 3]) / 65535);
+    const b = _srgbEotf((pixels[base + 4] << 8 | pixels[base + 5]) / 65535);
+    return {
+        rNits: r, gNits: g, bNits: b,
+        luminance: 0.2126 * r + 0.7152 * g + 0.0722 * b,
+        gamut: 'SDR',
+    };
 }
 
 // Assign a dedicated pool slot for a URL (one slot per URL, no eviction).
@@ -983,7 +1101,7 @@ function openLightbox(batchItems, startIndex) {
 
         // Filmstrip: only close if click is outside the horizontal span of all thumbnails
         if (e.target === filmstrip) {
-            const thumbs = filmstrip.querySelectorAll('.lightbox-filmstrip-thumb');
+            const thumbs = filmstrip.querySelectorAll('.lightbox-filmstrip-item');
             if (thumbs.length === 0) { closeLightbox(); return; }
             const first = thumbs[0].getBoundingClientRect();
             const last  = thumbs[thumbs.length - 1].getBoundingClientRect();
@@ -1606,6 +1724,7 @@ function openLightbox(batchItems, startIndex) {
 
     // ── Per-pixel nit-hunt ──
     let lbPixelBuffer = null;
+    let lbSdrMode = false;  // true when SDR toggle is active and we use the SDR pixel buffer
     let lbRafPending = false;
     let lbLastPixelX = -1, lbLastPixelY = -1;
 
@@ -1698,10 +1817,12 @@ function openLightbox(batchItems, startIndex) {
             }
         }
         if (!globalDetailsEnabled) return;
-        if (lightboxSdrActive) return;
+        if (lightboxSdrActive) return;  // slider mode — nit tool not usable while slider is open
+        const _curItem = lightboxBatch[lightboxIndex];
         if (!lbPixelBuffer) {
-            const item = lightboxBatch[lightboxIndex];
-            const bufPromise = lightboxPixelBuffers.get(item.id);
+            const bufPromise = lbSdrMode
+                ? lightboxSdrPixelBuffers.get(_curItem.id)
+                : lightboxPixelBuffers.get(_curItem.id);
             if (bufPromise) {
                 nitTooltip.style.display = 'block';
                 nitTooltip.innerHTML = _NIT_LOADING_HTML;
@@ -1712,7 +1833,10 @@ function openLightbox(batchItems, startIndex) {
         nitTooltip.style.display = 'block';
         const { imgX, imgY } = cursorToPixel(lastCursorX, lastCursorY, lbPixelBuffer);
         lbLastPixelX = imgX; lbLastPixelY = imgY;
-        const { rNits, gNits, bNits, luminance, gamut } = getNitsAtPixel(lbPixelBuffer, imgX, imgY);
+        const _nitResult = lbSdrMode
+            ? _getNitsAtPixelSdr(lbPixelBuffer, imgX, imgY)
+            : getNitsAtPixel(lbPixelBuffer, imgX, imgY);
+        const { rNits, gNits, bNits, luminance, gamut } = _nitResult;
         nitTooltip.innerHTML = _nitTooltipHTML(rNits, gNits, bNits, luminance, gamut);
     });
     imgEl.addEventListener('mouseleave', () => {
@@ -1728,14 +1852,17 @@ function openLightbox(batchItems, startIndex) {
         // Reset idle timer on any movement in zoom mode (not analysis mode)
         _resetZoomIdleTimer();
         if (!lbPixelBuffer || !globalDetailsEnabled) return;
-        if (lightboxSdrActive) return;
+        if (lightboxSdrActive) return;  // slider mode blocks nit tool
         lbRafPending = true;
         requestAnimationFrame(() => {
             lbRafPending = false;
             const { imgX, imgY } = cursorToPixel(e.clientX, e.clientY, lbPixelBuffer);
             if (imgX === lbLastPixelX && imgY === lbLastPixelY) return;
             lbLastPixelX = imgX; lbLastPixelY = imgY;
-            const { rNits, gNits, bNits, luminance, gamut } = getNitsAtPixel(lbPixelBuffer, imgX, imgY);
+            const _nitResult = lbSdrMode
+                ? _getNitsAtPixelSdr(lbPixelBuffer, imgX, imgY)
+                : getNitsAtPixel(lbPixelBuffer, imgX, imgY);
+            const { rNits, gNits, bNits, luminance, gamut } = _nitResult;
             nitTooltip.innerHTML = _nitTooltipHTML(rNits, gNits, bNits, luminance, gamut);
         });
     });
@@ -1913,6 +2040,7 @@ function openLightbox(batchItems, startIndex) {
         const _t0 = performance.now();
         console.log(`[lightbox] renderLightboxImage() start  +0ms`);
         lbPixelBuffer = null; // reset buffer for new image
+        lbSdrMode = false;
         lbLastPixelX = -1; lbLastPixelY = -1;
 
         // Reset zoom
@@ -1948,6 +2076,64 @@ function openLightbox(batchItems, startIndex) {
         // Remove existing details overlay
         const existingOverlay = imageWrapper.querySelector('.image-meta-overlay');
         if (existingOverlay) existingOverlay.remove();
+
+        // ── Spoiler handling ──────────────────────────────────────────────────
+        // Remove any spoiler overlay left from the previous image
+        const _prevSpoilerOverlay = imgContainer.querySelector('.lightbox-spoiler-overlay');
+        if (_prevSpoilerOverlay) _prevSpoilerOverlay.remove();
+        imgContainer.classList.remove('lightbox-spoiler', 'lightbox-spoiler-revealed');
+
+        // Always clear any leftover inline spoiler style from a previous image
+        imgEl.style.filter = '';
+        imgEl.style.transform = '';
+        imgEl.style.transition = '';
+
+        if (item.spoiler) {
+            const _spoilerKey = `spoiler-revealed:${item.id}`;
+            const _alreadyRevealed = localStorage.getItem(_spoilerKey) === '1';
+
+            if (!_alreadyRevealed) {
+                // Apply blur immediately as inline style — no transition, no class, fires
+                // before src is set so the bitmap is never visible unblurred even when
+                // it was already decoded in the prefetch pool.
+                imgEl.style.filter    = 'blur(32px) brightness(0.35)';
+                imgEl.style.transform = 'scale(1.06)';
+                imgEl.style.transition = 'none';
+
+                const _spoilerOverlay = document.createElement('div');
+                _spoilerOverlay.className = 'lightbox-spoiler-overlay';
+                _spoilerOverlay.innerHTML = `
+                    <div class="lightbox-spoiler-badge">
+                        <span>SPOILER</span>
+                        <span class="lightbox-spoiler-badge-sub">Click to reveal</span>
+                    </div>`;
+                imgContainer.appendChild(_spoilerOverlay);
+
+                _spoilerOverlay.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    // Smooth reveal transition only on the way out
+                    imgEl.style.transition = 'filter 0.35s ease, transform 0.35s ease';
+                    imgEl.style.filter = '';
+                    imgEl.style.transform = '';
+                    _spoilerOverlay.classList.add('lightbox-spoiler-overlay-hidden');
+                    localStorage.setItem(_spoilerKey, '1');
+                    // Clean up inline styles once the transition finishes
+                    imgEl.addEventListener('transitionend', () => {
+                        imgEl.style.filter = '';
+                        imgEl.style.transform = '';
+                        imgEl.style.transition = '';
+                    }, { once: true });
+                    // Also unblur the filmstrip thumb and remove its SPOILER label
+                    const _items = filmstrip.querySelectorAll('.lightbox-filmstrip-item');
+                    _items.forEach((_item, _i) => {
+                        if (lightboxBatch[_i]?.id === item.id) {
+                            _item.querySelector('.lightbox-filmstrip-thumb')?.classList.remove('lightbox-filmstrip-thumb-spoiler');
+                            _item.querySelector('.lightbox-filmstrip-spoiler-label')?.remove();
+                        }
+                    });
+                });
+            }
+        }
 
         // Update main image — always use full-res original for accurate HDR rendering
         const { url: displayUrl, fullUrl, blob } = lightboxBlobUrls.get(item.id);
@@ -2015,8 +2201,8 @@ function openLightbox(batchItems, startIndex) {
         }
 
         // Update filmstrip active state
-        filmstrip.querySelectorAll('.lightbox-filmstrip-thumb').forEach((thumb, i) => {
-            thumb.classList.toggle('lightbox-filmstrip-thumb-active', i === lightboxIndex);
+        filmstrip.querySelectorAll('.lightbox-filmstrip-item').forEach((item, i) => {
+            item.classList.toggle('lightbox-filmstrip-thumb-active', i === lightboxIndex);
         });
         // Scroll active thumbnail into view (touch / keyboard navigation)
         requestAnimationFrame(() => {
@@ -2320,14 +2506,28 @@ function openLightbox(batchItems, startIndex) {
             }
 
             if (lightboxSdrToggleActive) {
-                // Switch back to HDR
+                // ── Switch back to HDR ──────────────────────────────────────
                 const { fullUrl } = lightboxBlobUrls.get(item.id);
                 imgEl.src = fullUrl;
                 lightboxSdrToggleActive = false;
+                lbSdrMode = false;
+                lbPixelBuffer = null;
                 _setSdrPill(false);
-                // updateSaveBtn();
-                const metaOverlay = imageWrapper.querySelector('.image-meta-overlay');
-                if (metaOverlay) metaOverlay.style.visibility = '';
+
+                // Restore HDR metadata panel if analysis is active
+                if (globalDetailsEnabled) {
+                    const existing = imageWrapper.querySelector('.image-meta-overlay');
+                    if (existing) existing.remove();
+                    showDetailsForImage(item.id);
+                    // Re-prime the HDR pixel buffer
+                    _startPixelDecode(item);
+                    lightboxPixelBuffers.get(item.id)?.then(buf => {
+                        lbPixelBuffer = buf;
+                    });
+                } else {
+                    const metaOverlay = imageWrapper.querySelector('.image-meta-overlay');
+                    if (metaOverlay) metaOverlay.style.visibility = '';
+                }
                 return;
             }
 
@@ -2335,13 +2535,35 @@ function openLightbox(batchItems, startIndex) {
             if (sdrUrl) {
                 imgEl.src = sdrUrl;
                 lightboxSdrToggleActive = true;
+                lbSdrMode = true;
+                lbPixelBuffer = null;
                 _setSdrPill(true);
-                // updateSaveBtn();
-                // Hide analysis overlay while SDR view is active
-                const metaOverlay = imageWrapper.querySelector('.image-meta-overlay');
-                if (metaOverlay) metaOverlay.style.visibility = 'hidden';
-                nitTooltip.style.display = 'none';
-                _nitsRow.style.display = 'none';
+
+                // If analysis tool is active, switch to SDR metadata panel and SDR pixel buffer
+                if (globalDetailsEnabled) {
+                    _startSdrPixelDecode(item);
+                    const existing = imageWrapper.querySelector('.image-meta-overlay');
+                    if (existing) existing.remove();
+                    _showSdrMetadataOverlay(item, imageWrapper);
+                    // Wire up SDR pixel buffer for nit tooltip
+                    lightboxSdrPixelBuffers.get(item.id)?.then(buf => {
+                        lbPixelBuffer = buf;
+                        // If cursor is already over image, show nit tooltip immediately
+                        if (lbMouseInside && globalDetailsEnabled && buf) {
+                            const { imgX, imgY } = cursorToPixel(lastCursorX, lastCursorY, buf);
+                            lbLastPixelX = imgX; lbLastPixelY = imgY;
+                            nitTooltip.style.display = 'block';
+                            const _r = _getNitsAtPixelSdr(buf, imgX, imgY);
+                            nitTooltip.innerHTML = _nitTooltipHTML(_r.rNits, _r.gNits, _r.bNits, _r.luminance, _r.gamut);
+                        }
+                    });
+                } else {
+                    // Analysis not active — just hide meta overlay as before
+                    const metaOverlay = imageWrapper.querySelector('.image-meta-overlay');
+                    if (metaOverlay) metaOverlay.style.visibility = 'hidden';
+                    nitTooltip.style.display = 'none';
+                    _nitsRow.style.display = 'none';
+                }
             } else {
                 showStatusMessage('SDR version not available', 'error');
             }
@@ -2354,24 +2576,37 @@ function openLightbox(batchItems, startIndex) {
         if (lightboxBatch.length <= 1) return;
         lightboxBatch.forEach((item, idx) => {
             const { url } = lightboxBlobUrls.get(item.id);
+            const isSpoiler = item.spoiler && localStorage.getItem(`spoiler-revealed:${item.id}`) !== '1';
+
+            const wrapper = document.createElement('div');
+            wrapper.className = 'lightbox-filmstrip-item' + (idx === lightboxIndex ? ' lightbox-filmstrip-thumb-active' : '');
+
             const thumb = document.createElement('img');
             thumb.src = url;
             thumb.alt = item.name;
-            thumb.className = 'lightbox-filmstrip-thumb' + (idx === lightboxIndex ? ' lightbox-filmstrip-thumb-active' : '');
+            thumb.className = 'lightbox-filmstrip-thumb';
+            if (isSpoiler) thumb.classList.add('lightbox-filmstrip-thumb-spoiler');
+            wrapper.appendChild(thumb);
+
+            if (isSpoiler) {
+                const label = document.createElement('span');
+                label.className = 'lightbox-filmstrip-spoiler-label';
+                wrapper.appendChild(label);
+            }
+
             // Track mousedown position so a drag-scroll doesn't fire a spurious click
             let _thumbMousedownX = 0, _thumbMousedownY = 0;
-            thumb.addEventListener('mousedown', (e) => {
+            wrapper.addEventListener('mousedown', (e) => {
                 _thumbMousedownX = e.clientX;
                 _thumbMousedownY = e.clientY;
             });
-            thumb.addEventListener('click', (e) => {
+            wrapper.addEventListener('click', (e) => {
                 e.stopPropagation();
-                // Ignore if the mouse moved more than 4px — user was drag-scrolling, not clicking
                 if (Math.abs(e.clientX - _thumbMousedownX) > 4 || Math.abs(e.clientY - _thumbMousedownY) > 4) return;
                 lightboxIndex = idx;
                 renderLightboxImage();
             });
-            filmstrip.appendChild(thumb);
+            filmstrip.appendChild(wrapper);
         });
     }
 
@@ -2444,6 +2679,7 @@ function closeLightbox() {
     lightboxBatch = [];
     lightboxIndex = 0;
     lightboxSdrToggleActive = false;
+    lightboxSdrPixelBuffers.clear();
     _lightboxRender = null;
     _lightboxResetZoomIdleTimer = null;
     _sdrPreloadCache.clear();
@@ -2611,30 +2847,124 @@ function formatFileSize(bytes) {
 
 // ─── Metadata Overlay Panels ─────────────────────────────────────────────────
 
-function showMetadataOverlay(filename, metadata, imageWrapper) {
-    // In global mode, just remove existing and show new
+// Builds and attaches the SDR metadata panel for a given item.
+// Static info (resolution, format) is shown immediately; luminance stats are
+// filled in once the SDR pixel buffer finishes decoding.
+function _showSdrMetadataOverlay(item, imageWrapper) {
     const existing = imageWrapper.querySelector('.image-meta-overlay');
-    if (existing) {
-        existing.remove();
+    if (existing) existing.remove();
+
+    const hdrMeta = item.metadata;
+    const res   = hdrMeta?.resolution ?? '—';
+    const w     = hdrMeta?.width  ?? 0;
+    const h     = hdrMeta?.height ?? 0;
+
+    const LUMA_PLACEHOLDER_ID = `sdr-luma-rows-${item.id}`;
+
+    let panelRows = '';
+    panelRows += `<div class="imo-section-title imo-section-title--file">File Info</div>`;
+    panelRows += imoRow('Resolution', res);
+    if (w && h) panelRows += imoRow('Aspect', getAspectRatioLabel(w, h));
+
+    // SDR file size — fetch via HEAD request on the Cloudinary URL
+    const SIZE_PLACEHOLDER_ID = `sdr-size-${item.id}`;
+    panelRows += `<span id="${SIZE_PLACEHOLDER_ID}"></span>`;
+
+    panelRows += imoRow('Format', 'AVIF · 8-bit sRGB');
+
+    panelRows += `<div class="imo-section-title imo-section-title--luminance">Luminance (SDR)</div>`;
+    panelRows += `<div id="${LUMA_PLACEHOLDER_ID}">` +
+        `<div class="imo-row imo-row--unavailable" style="display:flex;align-items:center;gap:6px;">` +
+        `<svg class="nit-loading__spinner" xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>` +
+        `Computing…</div></div>`;
+
+    const overlay = document.createElement('div');
+    overlay.className = 'image-meta-overlay';
+    overlay.innerHTML = `
+        <div class="imo-panels">
+            <div class="imo-panel imo-panel-single imo-draggable">
+                <div class="imo-drag-handle"></div>
+                ${panelRows}
+            </div>
+        </div>`;
+
+    const imgContainer = imageWrapper.querySelector('.lightbox-image-container') || imageWrapper;
+    imgContainer.appendChild(overlay);
+    _initImoPanel(overlay, imageWrapper);
+
+    // Fetch SDR file size via HEAD request (non-blocking)
+    const sdrUrl = lightboxBlobUrls.get(item.id)?.sdrUrl;
+    if (sdrUrl) {
+        fetch(sdrUrl, { method: 'HEAD' }).then(r => {
+            const sizePlaceholder = document.getElementById(SIZE_PLACEHOLDER_ID);
+            if (!sizePlaceholder) return;
+            const bytes = parseInt(r.headers.get('content-length') || '0', 10);
+            sizePlaceholder.outerHTML = bytes > 0 ? imoRow('Size', formatFileSize(bytes)) : '';
+        }).catch(() => {
+            const sizePlaceholder = document.getElementById(SIZE_PLACEHOLDER_ID);
+            if (sizePlaceholder) sizePlaceholder.outerHTML = '';
+        });
     }
 
-    // --- Build single panel: File Info on top, then HDR Metadata, Luminance, Gamut ---
+    // Fill in luminance stats — use stored stats from Firestore if available (new images),
+    // fall back to pixel buffer decode for older images that don't have them yet.
+    if (item.sdrLuminanceStats) {
+        const { maxLuminance, avgLuminance, minLuminance } = item.sdrLuminanceStats;
+        document.getElementById(LUMA_PLACEHOLDER_ID).innerHTML =
+            imoRow('Max', `${maxLuminance.toFixed(2)} cd/m²`) +
+            imoRow('Avg', `${avgLuminance.toFixed(2)} cd/m²`) +
+            imoRow('Min', `${minLuminance.toFixed(2)} cd/m²`);
+    } else {
+        _startSdrPixelDecode(item);
+        lightboxSdrPixelBuffers.get(item.id)?.then(buf => {
+            const placeholder = document.getElementById(LUMA_PLACEHOLDER_ID);
+            if (!placeholder) return;
+            if (!buf) {
+                placeholder.innerHTML = `<div class="imo-row imo-row--unavailable">Not available</div>`;
+                return;
+            }
+
+            const { pixels, width, height, samplesPerPixel } = buf;
+            const bytesPerPx = samplesPerPixel * 2;
+            let maxL = 0, sumL = 0, minL = Infinity;
+            const total = width * height;
+            for (let i = 0; i < total; i++) {
+                const base = i * bytesPerPx;
+                const r = _srgbEotf((pixels[base]     << 8 | pixels[base + 1]) / 65535);
+                const g = _srgbEotf((pixels[base + 2] << 8 | pixels[base + 3]) / 65535);
+                const b = _srgbEotf((pixels[base + 4] << 8 | pixels[base + 5]) / 65535);
+                const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                if (lum > maxL) maxL = lum;
+                if (lum < minL) minL = lum;
+                sumL += lum;
+            }
+            const avgL = sumL / total;
+
+            placeholder.innerHTML =
+                imoRow('Max', `${maxL.toFixed(2)} cd/m²`) +
+                imoRow('Avg', `${avgL.toFixed(2)} cd/m²`) +
+                imoRow('Min', `${(minL === Infinity ? 0 : minL).toFixed(2)} cd/m²`);
+        });
+    }
+}
+
+function showMetadataOverlay(filename, metadata, imageWrapper) {
+    const existing = imageWrapper.querySelector('.image-meta-overlay');
+    if (existing) existing.remove();
+
     let panelRows = '';
 
-    // File Info (top section)
     panelRows += `<div class="imo-section-title imo-section-title--file">File Info</div>`;
     panelRows += imoRow('Resolution', metadata.resolution);
     panelRows += imoRow('Aspect', getAspectRatioLabel(metadata.width, metadata.height));
     panelRows += imoRow('Size', formatFileSize(metadata.fileSize));
 
-    // Build a descriptive format string from available metadata
     const fileExt = getFileExtension(filename).replace('.', '').toUpperCase();
     const formatParts = [fileExt];
     if (metadata.hdr?.colorType && metadata.hdr.colorType !== 'Unknown') formatParts.push(metadata.hdr.colorType);
     if (metadata.hdr?.colorPrimaries) formatParts.push(metadata.hdr.colorPrimaries);
     panelRows += imoRow('Format', formatParts.join(' · '));
 
-    // HDR Metadata
     if (metadata.hdr) {
         panelRows += `<div class="imo-section-title imo-section-title--hdr">HDR Metadata</div>`;
         panelRows += imoRow('Bit Depth', metadata.hdr.bitDepth);
@@ -2645,7 +2975,6 @@ function showMetadataOverlay(filename, metadata, imageWrapper) {
         if (metadata.hdr.format) panelRows += imoRow('Format', metadata.hdr.format);
     }
 
-    // Luminance
     if (metadata.luminanceStats) {
         const tc = metadata.luminanceStats.transferCharacteristic;
         const maxCLLlabel = tc === 16 || tc === 18 ? 'MaxCLL' : 'MaxCLL (scRGB)';
@@ -2662,7 +2991,6 @@ function showMetadataOverlay(filename, metadata, imageWrapper) {
         panelRows += `<div class="imo-row imo-row--unavailable">Not available for this file type</div>`;
     }
 
-    // Gamut
     if (metadata.gamutCoverage) {
         if (metadata.gamutCoverage.narrowSource) {
             panelRows += `<div class="imo-section-title imo-section-title--gamut">Gamut</div>`;
@@ -2683,14 +3011,17 @@ function showMetadataOverlay(filename, metadata, imageWrapper) {
                 <div class="imo-drag-handle"></div>
                 ${panelRows}
             </div>
-        </div>
-    `;
+        </div>`;
 
-    // Append to the image container so the overlay is bounded to the image area,
-    // not the full wrapper (which includes the header above the image).
     const imgContainer = imageWrapper.querySelector('.lightbox-image-container') || imageWrapper;
     imgContainer.appendChild(overlay);
+    _initImoPanel(overlay, imageWrapper);
+}
 
+// Positions and wires up drag behaviour for an .image-meta-overlay panel.
+// Called by both showMetadataOverlay and _showSdrMetadataOverlay after the
+// overlay element has been appended to the DOM.
+function _initImoPanel(overlay, imageWrapper) {
     const panel = overlay.querySelector('.imo-panel');
     // Set grab cursor as inline style — beats inherited cursor-nit-hunt from parent wrapper
     panel.style.cursor = 'grab';
@@ -3355,6 +3686,7 @@ function buildFilterBar(allItems) {
                     <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="5" height="7" rx="1"/><rect x="9.5" y="3" width="5" height="7" rx="1"/><rect x="17" y="3" width="5" height="7" rx="1"/><rect x="2" y="14" width="5" height="7" rx="1"/><rect x="9.5" y="14" width="5" height="7" rx="1"/><rect x="17" y="14" width="5" height="7" rx="1"/></svg>
                 </button>
             </div>
+            <span id="filterBarCount" class="filter-bar-count"></span>
         </div>
     `;
 
@@ -3560,14 +3892,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (_imgParam && _allGalleryItems.length) {
         const _targetItem = _allGalleryItems.find(it => it.id === _imgParam);
         if (_targetItem) {
-            // Find the batch this item belongs to
-            const _batchKey = _targetItem.batchId || `solo_${_targetItem.id}`;
-            const _batchItems = _allGalleryItems.filter(it =>
-                (it.batchId && it.batchId === _targetItem.batchId) ||
-                (!it.batchId && it.id === _targetItem.id)
-            );
-            const _startIdx = _batchItems.findIndex(it => it.id === _targetItem.id);
-            openLightbox(_batchItems, Math.max(0, _startIdx));
+            const _visibleItems = applyFilters(_allGalleryItems);
+            const _startIdx = _visibleItems.findIndex(it => it.id === _targetItem.id);
+            openLightbox(_visibleItems, Math.max(0, _startIdx));
         }
     }
 });
@@ -3635,7 +3962,7 @@ document.addEventListener('keydown', (e) => {
         // Always update filmstrip highlight immediately for visual feedback
         const filmstrip = document.querySelector('.lightbox-filmstrip');
         if (filmstrip) {
-            filmstrip.querySelectorAll('.lightbox-filmstrip-thumb').forEach((t, i) => {
+            filmstrip.querySelectorAll('.lightbox-filmstrip-item').forEach((t, i) => {
                 t.classList.toggle('lightbox-filmstrip-thumb-active', i === lightboxIndex);
             });
             const active = filmstrip.querySelector('.lightbox-filmstrip-thumb-active');

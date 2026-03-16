@@ -1050,6 +1050,21 @@ button.button-active:active {
     max-width: 560px;
 }
 
+.filter-bar-count {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    font-weight: 500;
+    color: #54ff6b;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.filter-bar-count svg {
+    flex-shrink: 0;
+}
+
 .gallery-search-wrap {
     position: relative;
     flex: 1;
@@ -1902,7 +1917,7 @@ button.button-active:active {
     background: color-mix(in srgb, var(--hdr-badge-color, #a78bfa) 12%, transparent);
     border: 1px solid color-mix(in srgb, var(--hdr-badge-color, #a78bfa) 30%, transparent);
     border-radius: 4px;
-    padding: 2px 7px;
+    padding: 1px 4px;
     white-space: nowrap;
     align-self: center;
 }
@@ -2141,6 +2156,50 @@ button.button-active:active {
     background: rgba(0, 0, 0, 0.7);
     padding: 6px 18px;
     border-radius: 20px;
+}
+
+/* ─── Lightbox Spoiler ───────────────────────────────────────────────────────── */
+
+.lightbox-spoiler-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10;
+    cursor: pointer;
+    transition: opacity 0.3s ease;
+}
+
+.lightbox-spoiler-overlay.lightbox-spoiler-overlay-hidden {
+    opacity: 0;
+    pointer-events: none;
+}
+
+.lightbox-spoiler-badge {
+    background: rgba(0, 0, 0, 0.72);
+    color: #fff;
+    font-size: 15px;
+    font-weight: 800;
+    letter-spacing: 0.12em;
+    padding: 10px 28px;
+    border-radius: 24px;
+    user-select: none;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+}
+
+.lightbox-spoiler-badge-sub {
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    opacity: 0.7;
+}
+
+.lightbox-filmstrip-thumb-spoiler {
+    filter: blur(6px) brightness(0.4);
 }
 
 /* ─── Lightbox ───────────────────────────────────────────────────────────────── */
@@ -2451,8 +2510,12 @@ button.button-active:active {
         padding: 4px 8px;
     }
 
-    .lightbox-filmstrip-thumb {
+    .lightbox-filmstrip-item {
         height: 40px;
+    }
+
+    .lightbox-filmstrip-thumb {
+        height: 100%;
     }
 
 }
@@ -2557,26 +2620,57 @@ button.button-active:active {
 
 
 
-.lightbox-filmstrip-thumb {
-    height: 56px;
-    width: auto;
-    min-width: 40px;
-    object-fit: cover;
-    border-radius: 3px;
-    cursor: pointer;
-    opacity: 0.45;
-    border: 2px solid transparent;
-    transition: opacity 0.15s ease, border-color 0.15s ease;
+.lightbox-filmstrip-item {
+    position: relative;
     flex-shrink: 0;
+    height: 56px;
+    cursor: pointer;
+    border-radius: 3px;
+    border: 2px solid transparent;
+    transition: border-color 0.15s ease;
+    overflow: hidden;
 }
 
-.lightbox-filmstrip-thumb:hover {
+.lightbox-filmstrip-item:hover .lightbox-filmstrip-thumb {
     opacity: 0.75;
 }
 
-.lightbox-filmstrip-thumb-active {
+.lightbox-filmstrip-thumb-active .lightbox-filmstrip-thumb {
     opacity: 1;
+}
+
+.lightbox-filmstrip-thumb-active {
     border-color: #2b6cff;
+}
+
+.lightbox-filmstrip-thumb {
+    height: 100%;
+    width: auto;
+    min-width: 40px;
+    object-fit: cover;
+    display: block;
+    opacity: 0.45;
+    transition: opacity 0.15s ease;
+}
+
+.lightbox-filmstrip-spoiler-label {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+}
+
+.lightbox-filmstrip-spoiler-label::after {
+    content: 'SPOILER';
+    background: rgba(0, 0, 0, 0.75);
+    color: #fff;
+    font-size: 7px;
+    font-weight: 800;
+    letter-spacing: 0.1em;
+    padding: 3px 6px;
+    border-radius: 10px;
 }
 
 /* ─── Lightbox Nav Arrows ────────────────────────────────────────────────────── */
@@ -2704,6 +2798,7 @@ button.button-active:active {
 .nit-grid__gamut--709  { color: #60a5fa; }
 .nit-grid__gamut--p3   { color: #34d399; }
 .nit-grid__gamut--2020 { color: #f472b6; }
+.nit-grid__gamut--sdr  { color: #a3a3a3; }
 
 /* ─── Nit Loading ────────────────────────────────────────────────────────────── */
 
@@ -2762,23 +2857,36 @@ button.button-active:active {
 
 /* Lightbox header title + subtitle wrapper */
 .lightbox-image-header-title-wrap {
+    position: relative;
     display: flex;
-    flex-direction: column;
     align-items: center;
-    gap: 2px;
     min-width: 0;
-    overflow: hidden;
+}
+
+.lightbox-image-header-title-row {
+    display: flex;
+    flex-direction: row;
+    align-items: baseline;
+    min-width: 0;
 }
 
 .lightbox-image-header-subtitle {
+    position: absolute;
+    left: 100%;
+    top: 50%;
+    transform: translateY(-50%);
     font-size: 11px;
     font-weight: 400;
     color: #888;
     white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    text-align: center;
-    max-width: 100%;
+}
+
+.lightbox-image-header-subtitle:not([hidden])::before {
+    content: '|';
+    color: #747474;
+    font-size: 14px;
+    margin: 0 5px;
+    font-weight: 400;
 }
 
 .collage-title-count-badge svg {

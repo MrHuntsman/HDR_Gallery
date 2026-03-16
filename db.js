@@ -65,7 +65,7 @@ function generateBatchId() {
 
 // Upload all three blobs to Cloudinary, then store the URLs + metadata in Firestore.
 // Returns the new Firestore document ID (string).
-async function addImageFile(file, metadata = null, sdrBlob = null, hdrType = null, batchId = null, thumbBlob = null, gameName = null, spoiler = false, additionalInfo = null) {
+async function addImageFile(file, metadata = null, sdrBlob = null, hdrType = null, batchId = null, thumbBlob = null, gameName = null, spoiler = false, additionalInfo = null, sdrLuminanceStats = null) {
     const uid  = await _getUid();
     const base = file.name.replace(/\.[^.]+$/, '');
 
@@ -82,22 +82,23 @@ async function addImageFile(file, metadata = null, sdrBlob = null, hdrType = nul
     ]);
 
     const ref = await _col.add({
-        uid:           uid,           // owner — used by Firestore security rules
-        name:          file.name,
-        type:          file.type || '',
-        created:       Date.now(),
-        metadata:      metadata  ?? null,
-        hdrType:       hdrType   ?? null,
-        batchId:       batchId   ?? null,
-        gameName:      gameName  ?? null,
-        spoiler:       spoiler   ?? false,
-        additionalInfo: additionalInfo ?? null,
-        hdrUrl:        hdr.url,
-        hdrPublicId:   hdr.publicId,
-        sdrUrl:        sdr.url,
-        sdrPublicId:   sdr.publicId,
-        thumbUrl:      thumb.url,
-        thumbPublicId: thumb.publicId,
+        uid:                uid,
+        name:               file.name,
+        type:               file.type || '',
+        created:            Date.now(),
+        metadata:           metadata           ?? null,
+        hdrType:            hdrType            ?? null,
+        batchId:            batchId            ?? null,
+        gameName:           gameName           ?? null,
+        spoiler:            spoiler            ?? false,
+        additionalInfo:     additionalInfo     ?? null,
+        sdrLuminanceStats:  sdrLuminanceStats  ?? null,
+        hdrUrl:             hdr.url,
+        hdrPublicId:        hdr.publicId,
+        sdrUrl:             sdr.url,
+        sdrPublicId:        sdr.publicId,
+        thumbUrl:           thumb.url,
+        thumbPublicId:      thumb.publicId,
     });
 
     return ref.id;
