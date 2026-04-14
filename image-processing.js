@@ -12,7 +12,7 @@ const IMAGE_CONFIG = {
     // Set hdrLossless: true for bit-exact round-trips (e.g. archival uploads).
     // When true, quality/tune are ignored and the encoder uses AV1 lossless mode.
     // Expect 3-6x larger files compared to quality 95.
-    hdrLossless:      false,
+    hdrLossless:      true,
     hdrAvifQuality:   95,
     hdrAvifSpeed:     10,
     hdrTileRowsLog2:  1,   // 2x2 tiling for parallel encode on large images

@@ -862,10 +862,13 @@ function createCollageCard(batchItems, isGameGrouped = false, viewMode = 'list')
 
         cell.addEventListener('click', () => {
             if (galleryViewMode === 'list') {
-                // In list mode, the filmstrip should show ALL visible images across every batch
+                // In list mode, scope the lightbox to images from the same game section
                 const visibleItems = applyFilters(_allGalleryItems);
-                const globalIdx = visibleItems.findIndex(it => it.id === item.id);
-                openLightbox(visibleItems, Math.max(0, globalIdx));
+                const gameItems = item.gameName
+                    ? visibleItems.filter(it => it.gameName === item.gameName)
+                    : visibleItems.filter(it => !it.gameName);
+                const gameIdx = gameItems.findIndex(it => it.id === item.id);
+                openLightbox(gameItems, Math.max(0, gameIdx));
             } else {
                 openLightbox(batchItems, idx);
             }
@@ -3893,8 +3896,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         const _targetItem = _allGalleryItems.find(it => it.id === _imgParam);
         if (_targetItem) {
             const _visibleItems = applyFilters(_allGalleryItems);
-            const _startIdx = _visibleItems.findIndex(it => it.id === _targetItem.id);
-            openLightbox(_visibleItems, Math.max(0, _startIdx));
+            // Scope the filmstrip to the same game section as the linked image
+            const _gameItems = _targetItem.gameName
+                ? _visibleItems.filter(it => it.gameName === _targetItem.gameName)
+                : _visibleItems.filter(it => !it.gameName);
+            const _startIdx = _gameItems.findIndex(it => it.id === _targetItem.id);
+            openLightbox(_gameItems, Math.max(0, _startIdx));
         }
     }
 });
