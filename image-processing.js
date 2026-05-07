@@ -14,7 +14,7 @@ const IMAGE_CONFIG = {
     // Expect 3-6x larger files compared to quality 95.
     hdrLossless:      false,
     hdrAvifQuality:   98,
-    hdrAvifSpeed:     5,
+    hdrAvifSpeed:     8,
     hdrTileRowsLog2:  1,   // 2x2 tiling for parallel encode on large images
     hdrTileColsLog2:  1,
     hdrTune:          2,   // 2 = SSIM (perceptually optimised); ignored when hdrLossless
