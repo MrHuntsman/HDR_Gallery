@@ -321,11 +321,14 @@ dropZone.addEventListener('click', () => {
 
 function toggleGlobalDetailsMode() {
     const hasActiveCompareSlider = !!document.querySelector('#lightbox-overlay .inline-comparison-slider');
+    console.log(`[imo] toggleGlobalDetailsMode called, currentlyEnabled=${globalDetailsEnabled}, hasActiveCompareSlider=${hasActiveCompareSlider}, hasCompareTarget=${!!_compareTargetItem}, lightboxOpen=${lightboxOpen}`);
     if (hasActiveCompareSlider && !globalDetailsEnabled && !_compareTargetItem) {
+        console.log('[imo] toggle blocked: active compare slider with no compare target');
         return;
     }
 
     globalDetailsEnabled = !globalDetailsEnabled;
+    console.log(`[imo] globalDetailsEnabled now ${globalDetailsEnabled}`);
     
     // Update all detail buttons (in lightbox toolbar)
     updateAllDetailButtons(globalDetailsEnabled);
@@ -339,6 +342,7 @@ function toggleGlobalDetailsMode() {
             const container = document.querySelector('.lightbox-image-container');
             if (container) container.classList.add('cursor-nit-hunt');
             const currentItem = lightboxBatch[lightboxIndex];
+            console.log(`[imo] enabling analysis, currentItem=${currentItem?.id}, lightboxSdrToggleActive=${lightboxSdrToggleActive}`);
             if (currentItem) {
                 if (lightboxSdrToggleActive) {
                     // In SDR toggle mode — decode SDR buffer and show SDR metadata panel
@@ -363,6 +367,7 @@ function toggleGlobalDetailsMode() {
                     // Normal HDR mode, compare slider mode, or compare target swap mode.
                     const detailsTarget = _getVisibleLightboxItem() || currentItem;
                     currentVisibleImage = detailsTarget.id;
+                    console.log(`[imo] normal path, detailsTarget=${detailsTarget.id}, wrapperExists=${imageWrappers.has(detailsTarget.id)}`);
                     _startPixelDecode(detailsTarget);
                     showDetailsForImage(currentVisibleImage);
                     const imgElActive = document.querySelector('.lightbox-image');
@@ -409,27 +414,36 @@ function _getVisibleLightboxItem() {
 }
 
 async function showDetailsForImage(imageId, retries = 10) {
+    console.log(`[imo] showDetailsForImage called, imageId=${imageId}, retries=${retries}, wrapperFound=${imageWrappers.has(imageId)}, imageWrappersSize=${imageWrappers.size}`);
     let imageData = imageWrappers.get(imageId);
     if (!imageData && retries > 0) {
         await new Promise(r => requestAnimationFrame(r));
         return showDetailsForImage(imageId, retries - 1);
     }
-    if (!imageData) return;
-    
+    if (!imageData) {
+        console.warn(`[imo] GIVING UP: no imageWrappers entry for imageId=${imageId} after all retries. Panel will NOT be created.`);
+        return;
+    }
+
     const { wrapper, imageItem } = imageData;
     let { metadata } = imageData;
-    
+    console.log(`[imo] wrapper resolved for imageId=${imageId}, wrapperInDom=${document.body.contains(wrapper)}, hasCachedMetadata=${!!metadata}`);
+
     // If metadata is not yet loaded, fetch it
     if (!metadata) {
+        console.log(`[imo] no cached metadata, calling getImageFile(${imageItem.id})`);
         const freshImageItem = await getImageFile(imageItem.id);
         
         metadata = freshImageItem?.metadata;
+        console.log(`[imo] getImageFile resolved, metadataFromDb=${!!metadata}`);
         
         // If still no metadata, extract it
         if (!metadata) {
+            console.log(`[imo] no metadata in db, fetching blob from ${imageItem.hdrUrl}`);
             const resp = await fetch(imageItem.hdrUrl);
             const blob = await resp.blob();
             metadata = await getImageMetadata(blob, imageItem.name);
+            console.log(`[imo] extracted metadata from blob, success=${!!metadata}`);
             
             // Save the extracted metadata to the database
             if (metadata && imageItem.id) {
@@ -459,12 +473,15 @@ async function showDetailsForImage(imageId, retries = 10) {
     }
     
     if (metadata) {
+        console.log(`[imo] metadata ready for imageId=${imageId}, calling showMetadataOverlay`);
         // Remove any existing overlay first
         const existing = wrapper.querySelector('.image-meta-overlay');
         if (existing) existing.remove();
         
         // Show the overlay without a trigger button (global mode)
         showMetadataOverlay(imageItem.name, metadata, wrapper);
+    } else {
+        console.warn(`[imo] no metadata resolved for imageId=${imageId}, panel NOT created`);
     }
 }
 
@@ -1080,12 +1097,17 @@ async function openCompareLightbox(id1, id2) {
     setTimeout(_tryClick, 50);
 }
 
-// On load: if the URL has ?compare=id1,id2 open the comparison lightbox directly.
-(function _checkCompareUrl() {
+// If the URL has ?compare=id1,id2, open the comparison lightbox — called after
+// refreshGallery() finishes (see DOMContentLoaded below), NOT at parse time.
+// Reason: opening it too early raced against buildGalleryCards()'s
+// imageWrappers.clear(), which could wipe the freshly-registered lightbox
+// wrapper entry before the Analysis Tool panel could read it (imo panel
+// silently never appearing, Chrome/Edge only — timing-dependent).
+function _checkCompareUrl() {
     const ids = (new URLSearchParams(window.location.search).get('compare') || '')
         .split(',').map(s => s.trim()).filter(Boolean);
     if (ids.length === 2) openCompareLightbox(ids[0], ids[1]);
-})();
+}
 
 function openLightbox(batchItems, startIndex) {
     if (lightboxOpen) closeLightbox();
@@ -3192,8 +3214,6 @@ function _showSdrMetadataOverlay(item, imageWrapper) {
 
     const imgContainer = imageWrapper.querySelector('.lightbox-image-container') || imageWrapper;
     imgContainer.appendChild(overlay);
-    _initImoPanel(overlay, imageWrapper);
-
     // Fetch SDR file size via HEAD request (non-blocking)
     const sdrUrl = lightboxBlobUrls.get(item.id)?.sdrUrl;
     if (sdrUrl) {
@@ -3251,6 +3271,7 @@ function _showSdrMetadataOverlay(item, imageWrapper) {
 }
 
 function showMetadataOverlay(filename, metadata, imageWrapper) {
+    console.log(`[imo] showMetadataOverlay entered, imageWrapperInDom=${document.body.contains(imageWrapper)}`);
     const existing = imageWrapper.querySelector('.image-meta-overlay');
     if (existing) existing.remove();
 
@@ -3316,7 +3337,9 @@ function showMetadataOverlay(filename, metadata, imageWrapper) {
         </div>`;
 
     const imgContainer = imageWrapper.querySelector('.lightbox-image-container') || imageWrapper;
+    console.log(`[imo] appending overlay, imgContainerFound=${!!imgContainer}, usingFallback=${!imageWrapper.querySelector('.lightbox-image-container')}`);
     imgContainer.appendChild(overlay);
+    console.log(`[imo] overlay appended, overlayInDom=${document.body.contains(overlay)}`);
     _initImoPanel(overlay, imageWrapper);
 }
 
@@ -3324,7 +3347,12 @@ function showMetadataOverlay(filename, metadata, imageWrapper) {
 // Called by both showMetadataOverlay and _showSdrMetadataOverlay after the
 // overlay element has been appended to the DOM.
 function _initImoPanel(overlay, imageWrapper) {
+    console.log(`[imo] _initImoPanel called, overlayInDom=${document.body.contains(overlay)}`);
     const panel = overlay.querySelector('.imo-panel');
+    if (!panel) {
+        console.warn('[imo] _initImoPanel: .imo-panel not found inside overlay — panel will not render');
+        return;
+    }
     // Set grab cursor as inline style — beats inherited cursor-nit-hunt from parent wrapper
     panel.style.cursor = 'grab';
 
@@ -4199,6 +4227,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (input)    input.value = _gameParam;
         if (clearBtn) clearBtn.style.display = 'flex';
     }
+
+    // Deep-link: if the URL contains ?compare=id1,id2, open the comparison lightbox.
+    // Runs AFTER refreshGallery() so buildGalleryCards()'s imageWrappers.clear()
+    // can't wipe out the wrapper entry the compare lightbox just registered.
+    _checkCompareUrl();
 
     // Deep-link: if the URL contains ?img=<firestoreId>, open that image's lightbox
     if (_imgParam && _allGalleryItems.length) {
