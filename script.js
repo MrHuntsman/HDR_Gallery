@@ -200,8 +200,9 @@ const dropZone = document.getElementById('dropZone');
 // Only the admin can upload — hide the drop zone for everyone else.
 // Firestore rules are the real enforcement; this is just UI polish.
 isAdmin().then(admin => {
+    if (!admin) return; // stays hidden — index.html sets display:none by default
     const uploadSection = document.querySelector('.upload-section');
-    if (uploadSection) uploadSection.style.display = admin ? '' : 'none';
+    if (uploadSection) uploadSection.style.display = '';
 });
 
 // Global details toggle state
