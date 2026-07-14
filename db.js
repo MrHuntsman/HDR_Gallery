@@ -25,12 +25,28 @@ const _col   = _db.collection('images');
 
 // ── Anonymous Auth ────────────────────────────────────────────────────────────
 // Signs in anonymously on load — gives every visitor a stable uid without any
-// sign-in UI. Firebase persists the anonymous session in localStorage so the
-// same uid is reused across page refreshes until the user clears storage.
+// sign-in UI. Firebase persists the auth session (anonymous OR admin) in
+// localStorage, so we first wait to see if a session was already restored
+// before creating a new anonymous one — otherwise reloading after an admin
+// sign-in would immediately get clobbered by a brand new anonymous user.
 // _authReady resolves once we have a uid, so upload/delete calls can await it.
-const _authReady = _auth.signInAnonymously()
-    .then(() => console.log('[db] signed in anonymously, uid:', _auth.currentUser.uid))
-    .catch(err => console.error('[db] anonymous auth failed:', err));
+const _authReady = new Promise((resolve) => {
+    const unsubscribe = _auth.onAuthStateChanged(async (user) => {
+        unsubscribe();
+        if (user) {
+            console.log('[db] restored existing session, uid:', user.uid);
+            resolve();
+            return;
+        }
+        try {
+            await _auth.signInAnonymously();
+            console.log('[db] signed in anonymously, uid:', _auth.currentUser.uid);
+        } catch (err) {
+            console.error('[db] anonymous auth failed:', err);
+        }
+        resolve();
+    });
+});
 
 // Returns the current user's uid, waiting for auth to be ready first.
 async function _getUid() {
