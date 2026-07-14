@@ -181,11 +181,12 @@ async function clearAllImageFiles() {
     await batch.commit();
 }
 
-// Returns true if the current user owns the given image document.
-// Use this in script.js to decide whether to show delete buttons.
+// Returns true if the current user owns the given image document, or is the admin.
+// Use this in script.js to decide whether to show edit/delete buttons.
 async function isCurrentUserOwner(imageItem) {
     const uid = await _getUid();
-    return uid !== null && imageItem.uid === uid;
+    if (uid === null) return false;
+    return uid === imageItem.uid || uid === _ADMIN_UID;
 }
 
 const _ADMIN_UID = 'Ug1Y9PV7kARmLvGhx1pndiASDpJ3';
