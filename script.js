@@ -197,6 +197,13 @@ const galleryContainer = document.getElementById('gallery');
 const statusMessage = document.getElementById('statusMessage');
 const dropZone = document.getElementById('dropZone');
 
+// Only the admin can upload — hide the drop zone for everyone else.
+// Firestore rules are the real enforcement; this is just UI polish.
+isAdmin().then(admin => {
+    const uploadSection = document.querySelector('.upload-section');
+    if (uploadSection) uploadSection.style.display = admin ? '' : 'none';
+});
+
 // Global details toggle state
 let globalDetailsEnabled = false;
 let currentVisibleImage = null;

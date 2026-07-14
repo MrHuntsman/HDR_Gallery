@@ -171,3 +171,11 @@ async function isCurrentUserOwner(imageItem) {
     const uid = await _getUid();
     return uid !== null && imageItem.uid === uid;
 }
+
+const _ADMIN_UID = 'Ug1Y9PV7kARmLvGhx1pndiASDpJ3';
+
+// Returns true if the current user is the site admin (used to show/hide upload UI).
+async function isAdmin() {
+    const uid = await _getUid();
+    return uid === _ADMIN_UID;
+}
