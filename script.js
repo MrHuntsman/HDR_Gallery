@@ -320,19 +320,19 @@ dropZone.addEventListener('click', () => {
 // ─── Details Overlay (global nit-hunt + metadata panels) ─────────────────────
 
 function toggleGlobalDetailsMode() {
+    const hasActiveCompareSlider = !!document.querySelector('#lightbox-overlay .inline-comparison-slider');
+    if (hasActiveCompareSlider && !globalDetailsEnabled && !_compareTargetItem) {
+        return;
+    }
+
     globalDetailsEnabled = !globalDetailsEnabled;
     
     // Update all detail buttons (in lightbox toolbar)
     updateAllDetailButtons(globalDetailsEnabled);
 
     if (globalDetailsEnabled) {
-        // If lightbox is open, cancel SDR slider first (mutually exclusive with slider only)
-        if (lightboxOpen && lightboxSdrActive) {
-            const sdrSliderBtn = Array.from(document.querySelectorAll('.lightbox-toolbar button'))
-                .find(b => b.classList.contains('button-active') && b.textContent.includes('SDR'));
-            if (sdrSliderBtn) sdrSliderBtn.click();
-        }
-        // If lightbox is open, start pixel decode now and show details
+        // If the lightbox is open, enable analysis without dismissing the compare slider.
+        // The compare view can stay active while the IMO panel is overlaid on the image.
         if (lightboxOpen) {
             const imgEl = document.querySelector('.lightbox-image');
             if (imgEl) imgEl.classList.add('cursor-nit-hunt');
@@ -360,9 +360,11 @@ function toggleGlobalDetailsMode() {
                         }
                     });
                 } else {
-                    // Normal HDR mode
-                    _startPixelDecode(currentItem);
-                    if (currentVisibleImage) showDetailsForImage(currentVisibleImage);
+                    // Normal HDR mode, compare slider mode, or compare target swap mode.
+                    const detailsTarget = _getVisibleLightboxItem() || currentItem;
+                    currentVisibleImage = detailsTarget.id;
+                    _startPixelDecode(detailsTarget);
+                    showDetailsForImage(currentVisibleImage);
                     const imgElActive = document.querySelector('.lightbox-image');
                     if (imgElActive && imgElActive.matches(':hover')) {
                         imgElActive.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false }));
@@ -387,19 +389,31 @@ function toggleGlobalDetailsMode() {
 }
 
 function updateAllDetailButtons(isActive) {
+    const hasActiveCompareSlider = !!document.querySelector('#lightbox-overlay .inline-comparison-slider');
+
     document.querySelectorAll('.detail-button').forEach(button => {
+        button.classList.toggle('button-active', isActive);
+        button.classList.toggle('detail-button--blocked', hasActiveCompareSlider && !isActive && !_compareTargetItem);
+
         if (isActive) {
-            button.classList.add('button-active');
             button.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg><span class="btn-label"> <u>A</u>nalysis Tool</span>';
         } else {
-            button.classList.remove('button-active');
             button.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" opacity="0.3"></path><circle cx="12" cy="12" r="3"></circle></svg><span class="btn-label"> <u>A</u>nalysis Tool</span>';
         }
     });
 }
 
-async function showDetailsForImage(imageId) {
-    const imageData = imageWrappers.get(imageId);
+function _getVisibleLightboxItem() {
+    const baseItem = lightboxBatch[lightboxIndex];
+    return (_compareTargetItem && lightboxCompareImageActive) ? _compareTargetItem : baseItem;
+}
+
+async function showDetailsForImage(imageId, retries = 10) {
+    let imageData = imageWrappers.get(imageId);
+    if (!imageData && retries > 0) {
+        await new Promise(r => requestAnimationFrame(r));
+        return showDetailsForImage(imageId, retries - 1);
+    }
     if (!imageData) return;
     
     const { wrapper, imageItem } = imageData;
@@ -535,7 +549,7 @@ async function processFiles(selectedFiles) {
         fileInput.value = '';
         return; // User cancelled
     }
-    const { hdrType, gameName: importGameName, spoiler: importSpoiler, additionalInfo: importAdditionalInfo } = importResult;
+    const { hdrType, gameName: importGameName, spoiler: importSpoiler, hidden: importHidden, additionalInfo: importAdditionalInfo } = importResult;
 
     const toConvert = allowedFiles; // all formats go through the AVIF pipeline
 
@@ -617,7 +631,7 @@ async function processFiles(selectedFiles) {
             _renderProgress();
             const _tSave = performance.now();
             console.log('[processFiles] storing — thumb:', thumbBlob?.size, 'sdr:', sdrBlob?.size);
-            await addImageFile(hdrFile, metadata, sdrBlob, hdrType, batchId, thumbBlob, importGameName, importSpoiler, importAdditionalInfo, sdrLuminanceStats);
+            await addImageFile(hdrFile, metadata, sdrBlob, hdrType, batchId, thumbBlob, importGameName, importSpoiler, importAdditionalInfo, sdrLuminanceStats, importHidden);
             _importLog(`addImageFile: ${hdrFile.name}`, _tSave);
         }
         _importLog('total import', _importT0);
@@ -752,7 +766,8 @@ function renderGallery(allItems) {
 async function refreshGallery() {
     try {
         const imageFiles = await getAllImageFiles();
-        _allGalleryItems = imageFiles.slice().reverse();
+        const _admin = await isAdmin();
+        _allGalleryItems = imageFiles.slice().reverse().filter(item => !item.hidden || _admin);
 
         // Rebuild search bar with fresh game names (after import / delete / edit)
         const bar = document.getElementById('filterBar');
@@ -801,6 +816,13 @@ function createCollageCard(batchItems, isGameGrouped = false, viewMode = 'list')
         });
     }
     header.appendChild(titleEl);
+
+    if (batchItems.some(it => it.hidden)) {
+        const _hiddenBadge = document.createElement('span');
+        _hiddenBadge.className = 'collage-hidden-badge';
+        _hiddenBadge.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.94 10.94 0 0 1 12 20c-7 0-11-8-11-8a21.8 21.8 0 0 1 5.06-6.06M9.9 4.24A10.94 10.94 0 0 1 12 4c7 0 11 8 11 8a21.8 21.8 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg> Hidden`;
+        header.appendChild(_hiddenBadge);
+    }
 
     const _countBadge = document.createElement('span');
     _countBadge.className = 'collage-title-count-badge';
@@ -900,9 +922,18 @@ let lightboxPixelBuffers = new Map(); // imageId → buffer promise (HDR)
 let lightboxSdrPixelBuffers = new Map(); // imageId → buffer promise (SDR)
 let lightboxSdrActive = false;
 let lightboxSdrToggleActive = false; // full SDR view (no slider)
+let lightboxCompareImageActive = false; // toggles full compare image display when ?compare= is active
 let lightboxBlobUrls = new Map(); // imageId → { url, fullUrl, blob, sdrUrl }
 // Hook exposed by openLightbox so toggleGlobalDetailsMode can trigger the idle timer
 let _lightboxResetZoomIdleTimer = null;
+let _lightboxHdrInfoBar = null;
+let _lightboxHdrInfoBarMq = null;
+
+function _updateLightboxHdrInfoBar() {
+    if (!_lightboxHdrInfoBar || !_lightboxHdrInfoBarMq) return;
+    const isHdrSignalDetected = _lightboxHdrInfoBarMq.matches;
+    _lightboxHdrInfoBar.style.display = isHdrSignalDetected ? 'none' : 'flex';
+}
 
 // Shared decode promise cache — keyed by hdrUrl so hover prefetch and lightbox
 // can share the same in-flight promise rather than racing each other.
@@ -1010,6 +1041,52 @@ function _poolPrefetch(url) {
     return img;
 }
 
+// ─── Compare Mode ────────────────────────────────────────────────────────────
+// When set, the lightbox's SDR-slider button compares against this image
+// instead of the current item's own SDR render. Cleared on lightbox close.
+let _compareTargetItem = null;
+
+// Opens the normal lightbox for item1, with item2 wired in as the slider's
+// overlay target (via the existing SDR Slider button) instead of item1's SDR.
+async function openCompareLightbox(id1, id2) {
+    let item1, item2;
+    try {
+        [item1, item2] = await Promise.all([getImageFile(id1), getImageFile(id2)]);
+    } catch (err) {
+        console.error('[compare] failed to load images:', err);
+        showStatusMessage('Compare: failed to load one or both images', 'error');
+        return;
+    }
+    if (!item1 || !item2) {
+        showStatusMessage('Compare: one or both image IDs were not found', 'error');
+        return;
+    }
+    _compareTargetItem = item2;
+    openLightbox([item1], 0);
+    if (lightboxBlobUrls) {
+        lightboxBlobUrls.set(item2.id, {
+            url: item2.thumbUrl || item2.hdrUrl,
+            fullUrl: item2.hdrUrl,
+            blob: null,
+            sdrUrl: item2.sdrUrl || null,
+        });
+    }
+    // Auto-open the slider once the toolbar exists (renderLightboxImage runs async).
+    const _tryClick = () => {
+        const btn = document.querySelector('.js-compare-slider-btn');
+        if (btn) btn.click();
+        else if (lightboxOpen) setTimeout(_tryClick, 50);
+    };
+    setTimeout(_tryClick, 50);
+}
+
+// On load: if the URL has ?compare=id1,id2 open the comparison lightbox directly.
+(function _checkCompareUrl() {
+    const ids = (new URLSearchParams(window.location.search).get('compare') || '')
+        .split(',').map(s => s.trim()).filter(Boolean);
+    if (ids.length === 2) openCompareLightbox(ids[0], ids[1]);
+})();
+
 function openLightbox(batchItems, startIndex) {
     if (lightboxOpen) closeLightbox();
 
@@ -1021,6 +1098,7 @@ function openLightbox(batchItems, startIndex) {
     lightboxBatch = batchItems;
     lightboxIndex = startIndex;
     lightboxSdrActive = false;
+    lightboxCompareImageActive = false;
 
     // Create a DOM-connected decode pool sized to the full batch.
     // Each image that gets decoded gets its own permanent <img> slot so the browser
@@ -1220,10 +1298,25 @@ function openLightbox(batchItems, startIndex) {
         e.stopPropagation();
         const item = lightboxBatch[lightboxIndex];
         if (!item) return;
+
         const url = new URL(location.href);
         url.search = '';
-        url.searchParams.set('img', item.id);
-        navigator.clipboard.writeText(url.toString()).then(() => {
+
+        if (_compareTargetItem) {
+            url.searchParams.set('compare', `${item.id},${_compareTargetItem.id}`);
+        } else {
+            url.searchParams.set('img', item.id);
+        }
+
+        if (gameSearchQuery.trim()) {
+            url.searchParams.set('game', gameSearchQuery.trim());
+        } else {
+            url.searchParams.delete('game');
+        }
+
+        const copyText = url.toString();
+
+        navigator.clipboard.writeText(copyText).then(() => {
             copyLinkBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg><span class="btn-label"> Copied!</span>';
             copyLinkBtn.classList.add('lightbox-copy-link-btn--copied');
             setTimeout(() => {
@@ -1232,7 +1325,7 @@ function openLightbox(batchItems, startIndex) {
             }, 2000);
         }).catch(() => {
             const ta = document.createElement('textarea');
-            ta.value = url.toString();
+            ta.value = copyText;
             ta.style.position = 'fixed'; ta.style.opacity = '0';
             document.body.appendChild(ta);
             ta.select();
@@ -1294,6 +1387,42 @@ function openLightbox(batchItems, startIndex) {
     document.body.style.overflow = 'hidden';
     document.documentElement.style.overflow = 'hidden';
 
+    _lightboxHdrInfoBar = document.createElement('div');
+    _lightboxHdrInfoBar.className = 'hdr-info-bar hdr-info-bar-sdr lightbox-hdr-info-bar';
+    _lightboxHdrInfoBar.style.display = 'none';
+    _lightboxHdrInfoBar.innerHTML = `
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        <span><span class="sdr-browser-tip"><strong>No HDR signal detected</strong><span class="sdr-browser-tooltip"><strong>Browser HDR compatibility</strong><span class="sdr-browser-row"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#1bc174" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> Chromium-based: Chrome, Edge…</span><span class="sdr-browser-row"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#f87171" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg> Firefox</span></span></span> — Enable HDR on Windows and use a <span class="sdr-browser-tip"><strong>compatible browser</strong><span class="sdr-browser-tooltip"><strong>Browser HDR compatibility</strong><span class="sdr-browser-row"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#1bc174" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> Chromium-based: Chrome, Edge…</span><span class="sdr-browser-row"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#f87171" stroke-width="2.5" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg> Firefox</span></span></span>.</span>`;
+    overlay.appendChild(_lightboxHdrInfoBar);
+    _lightboxHdrInfoBarMq = window.matchMedia('(dynamic-range: high)');
+    if (typeof _lightboxHdrInfoBarMq.addEventListener === 'function') {
+        _lightboxHdrInfoBarMq.addEventListener('change', _updateLightboxHdrInfoBar);
+    } else if (typeof _lightboxHdrInfoBarMq.addListener === 'function') {
+        _lightboxHdrInfoBarMq.addListener(_updateLightboxHdrInfoBar);
+    }
+    _updateLightboxHdrInfoBar();
+
+    _lightboxHdrInfoBar.querySelectorAll('.sdr-browser-tip').forEach(_sdrTip => {
+        const _sdrTipBox = _sdrTip.querySelector('.sdr-browser-tooltip');
+        if (!_sdrTipBox) return;
+        _sdrTip.addEventListener('mouseenter', () => {
+            _sdrTipBox.style.visibility = 'hidden';
+            _sdrTipBox.style.display = 'flex';
+            _sdrTipBox.style.top = '0';
+            _sdrTipBox.style.left = '0';
+            const r = _sdrTip.getBoundingClientRect();
+            const tipW = _sdrTipBox.offsetWidth;
+            let left = r.left + r.width / 2 - tipW / 2;
+            left = Math.max(8, Math.min(left, window.innerWidth - tipW - 8));
+            _sdrTipBox.style.top = (r.bottom + 8) + 'px';
+            _sdrTipBox.style.left = left + 'px';
+            _sdrTipBox.style.visibility = 'visible';
+        });
+        _sdrTip.addEventListener('mouseleave', () => {
+            _sdrTipBox.style.display = 'none';
+        });
+    });
+
     // Trigger fade-in only once the first image is decoded — so image and overlay fade in together
     const firstEntry = lightboxBlobUrls.get(lightboxBatch[startIndex].id);
     const preloader = new Image();
@@ -1309,7 +1438,11 @@ function openLightbox(batchItems, startIndex) {
         : '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" opacity="0.3"></path><circle cx="12" cy="12" r="3"></circle></svg><span class="btn-label"> <u>A</u>nalysis Tool</span>';
     detailsBtn.title = 'Analysis Tool (A)';
     detailsBtn.dataset.tooltip = 'Analysis Tool (A)';
-    detailsBtn.onclick = () => toggleGlobalDetailsMode();
+    detailsBtn.onclick = () => {
+        const hasActiveCompareSlider = !!document.querySelector('#lightbox-overlay .inline-comparison-slider');
+        if (hasActiveCompareSlider && !globalDetailsEnabled && !_compareTargetItem) return;
+        toggleGlobalDetailsMode();
+    };
     toolbarLeft.appendChild(detailsBtn);
 
     const sep0 = document.createElement('div');
@@ -1317,17 +1450,31 @@ function openLightbox(batchItems, startIndex) {
     toolbarLeft.appendChild(sep0);
 
     const compareBtn = document.createElement('button');
-    compareBtn.className = 'button-secondary';
-    compareBtn.title = 'SDR Slider (S)';
-    compareBtn.dataset.tooltip = 'SDR Slider (S)';
-    compareBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12H3"/><path d="m7 8-4 4 4 4"/><path d="m17 8 4 4-4 4"/></svg><span class="btn-label"> <u>S</u>DR Slider</span>';
+    compareBtn.className = 'button-secondary js-compare-slider-btn';
+    compareBtn.title = _compareTargetItem ? 'Compare Slider (S)' : 'SDR Slider (S)';
+    compareBtn.dataset.tooltip = compareBtn.title;
+    compareBtn.innerHTML = _compareTargetItem
+        ? '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12H3"/><path d="m7 8-4 4 4 4"/><path d="m17 8 4 4-4 4"/></svg><span class="btn-label"> Compare</span>'
+        : '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12H3"/><path d="m7 8-4 4 4 4"/><path d="m17 8 4 4-4 4"/></svg><span class="btn-label"> <u>S</u>DR Slider</span>';
     toolbarLeft.appendChild(compareBtn);
+
+    function _compareBtnIconHTML() {
+        return _compareTargetItem
+            ? '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12H3"/><path d="m7 8-4 4 4 4"/><path d="m17 8 4 4-4 4"/></svg><span class="btn-label"> Compare</span>'
+            : '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12H3"/><path d="m7 8-4 4 4 4"/><path d="m17 8 4 4-4 4"/></svg><span class="btn-label"> <u>S</u>DR Slider</span>';
+    }
 
     const sdrToggleBtn = document.createElement('div');
     sdrToggleBtn.className = 'sdr-pill-toggle';
-    sdrToggleBtn.title = 'SDR Toggle (D)';
-    sdrToggleBtn.dataset.tooltip = 'SDR Toggle (D)';
-    sdrToggleBtn.innerHTML = '<span class="sdr-pill-seg" data-seg="sdr">SDR</span><span class="sdr-pill-seg sdr-pill-seg--active" data-seg="hdr">HDR</span>';
+    if (_compareTargetItem) {
+        sdrToggleBtn.title = 'Swap compared images (D)';
+        sdrToggleBtn.dataset.tooltip = 'Swap compared images (D)';
+        sdrToggleBtn.innerHTML = '<span class="sdr-pill-seg sdr-pill-seg--active" data-seg="image1">Image 1</span><span class="sdr-pill-seg" data-seg="image2">Image 2</span>';
+    } else {
+        sdrToggleBtn.title = 'SDR Toggle (D)';
+        sdrToggleBtn.dataset.tooltip = 'SDR Toggle (D)';
+        sdrToggleBtn.innerHTML = '<span class="sdr-pill-seg" data-seg="sdr">SDR</span><span class="sdr-pill-seg sdr-pill-seg--active" data-seg="hdr">HDR</span>';
+    }
     toolbarLeft.appendChild(sdrToggleBtn);
 
     const sep1 = document.createElement('div');
@@ -1828,8 +1975,7 @@ function openLightbox(batchItems, startIndex) {
             }
         }
         if (!globalDetailsEnabled) return;
-        if (lightboxSdrActive) return;  // slider mode — nit tool not usable while slider is open
-        const _curItem = lightboxBatch[lightboxIndex];
+        const _curItem = _getVisibleLightboxItem() || lightboxBatch[lightboxIndex];
         if (!lbPixelBuffer) {
             const bufPromise = lbSdrMode
                 ? lightboxSdrPixelBuffers.get(_curItem.id)
@@ -1863,7 +2009,10 @@ function openLightbox(batchItems, startIndex) {
         // Reset idle timer on any movement in zoom mode (not analysis mode)
         _resetZoomIdleTimer();
         if (!lbPixelBuffer || !globalDetailsEnabled) return;
-        if (lightboxSdrActive) return;  // slider mode blocks nit tool
+        const _curItem = _getVisibleLightboxItem() || lightboxBatch[lightboxIndex];
+        if (_curItem?.id !== currentVisibleImage) {
+            lbPixelBuffer = null;
+        }
         lbRafPending = true;
         requestAnimationFrame(() => {
             lbRafPending = false;
@@ -2038,9 +2187,14 @@ function openLightbox(batchItems, startIndex) {
     // ── Render function (called on init and navigation) ──
     async function renderLightboxImage() {
         const item = lightboxBatch[lightboxIndex];
-        // Update the page URL so this image has a shareable link
+        // Update the page URL so this image has a shareable link, unless the
+        // current URL is already using compare mode and should stay focused on it.
         const _shareUrl = new URL(location.href);
-        _shareUrl.searchParams.set('img', item.id);
+        if (_shareUrl.searchParams.has('compare')) {
+            _shareUrl.searchParams.delete('img');
+        } else {
+            _shareUrl.searchParams.set('img', item.id);
+        }
         // Preserve ?game= if a gallery filter is active
         if (gameSearchQuery.trim()) {
             _shareUrl.searchParams.set('game', gameSearchQuery.trim());
@@ -2076,12 +2230,19 @@ function openLightbox(batchItems, startIndex) {
         }
         lightboxSdrActive = false;
         compareBtn.classList.remove('button-active');
-        compareBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12H3"/><path d="m7 8-4 4 4 4"/><path d="m17 8 4 4-4 4"/></svg><span class="btn-label"> <u>S</u>DR Slider</span>';
+        compareBtn.innerHTML = _compareBtnIconHTML();
 
-        // Reset SDR full-view toggle
+        // Reset SDR full-view toggle / sync compare-image pill to current state.
+        // The 'hdr' seg check below only applies outside compare mode — in compare
+        // mode the pill has 'image1'/'image2' segs, so use _setSdrPill to keep the
+        // highlight in sync with lightboxCompareImageActive instead of blanking it.
         lightboxSdrToggleActive = false;
-        sdrToggleBtn.classList.remove('sdr-active');
-        sdrToggleBtn.querySelectorAll('.sdr-pill-seg').forEach(seg => seg.classList.toggle('sdr-pill-seg--active', seg.dataset.seg === 'hdr'));
+        if (_compareTargetItem) {
+            _setSdrPill();
+        } else {
+            sdrToggleBtn.classList.remove('sdr-active');
+            sdrToggleBtn.querySelectorAll('.sdr-pill-seg').forEach(seg => seg.classList.toggle('sdr-pill-seg--active', seg.dataset.seg === 'hdr'));
+        }
         // updateSaveBtn();
 
         // Remove existing details overlay
@@ -2173,6 +2334,9 @@ function openLightbox(batchItems, startIndex) {
 
         // Register in imageWrappers for global details system
         imageWrappers.set(item.id, { wrapper: imageWrapper, metadata: item.metadata || null, imageItem: item, compareButton: compareBtn, sdrToggle: sdrToggleBtn });
+        if (_compareTargetItem) {
+            imageWrappers.set(_compareTargetItem.id, { wrapper: imageWrapper, metadata: _compareTargetItem.metadata || null, imageItem: _compareTargetItem, compareButton: compareBtn, sdrToggle: sdrToggleBtn });
+        }
         currentVisibleImage = item.id;
 
         // Update cursor
@@ -2263,10 +2427,10 @@ function openLightbox(batchItems, startIndex) {
         editBtn.onclick = async () => {
             if (editBtn.disabled) return;
             editBtn.disabled = true;
-            const result = await showEditModal(item.hdrType, item.gameName, item.spoiler, item.thumbUrl || item.sdrUrl, item.additionalInfo);
+            const result = await showEditModal(item.hdrType, item.gameName, item.spoiler, item.thumbUrl || item.sdrUrl, item.additionalInfo, item.hidden);
             editBtn.disabled = false;
             if (result === null) return;
-            const { hdrType: newHdrType, gameName: newGameName, spoiler: newSpoiler, additionalInfo: newAdditionalInfo } = result;
+            const { hdrType: newHdrType, gameName: newGameName, spoiler: newSpoiler, hidden: newHidden, additionalInfo: newAdditionalInfo } = result;
             // Update all items in the batch in memory so navigation picks up the new name immediately
             lightboxBatch.forEach(batchItem => {
                 if (batchItem.batchId === item.batchId || batchItem.id === item.id) {
@@ -2276,6 +2440,7 @@ function openLightbox(batchItems, startIndex) {
                 }
                 if (batchItem.id === item.id) {
                     batchItem.additionalInfo = newAdditionalInfo;
+                    batchItem.hidden = newHidden;
                 }
             });
             // Also update the toolbar center title which is set once on open
@@ -2287,6 +2452,7 @@ function openLightbox(batchItems, startIndex) {
                 await updateImageHdrType(item.id, newHdrType);
                 if (item.batchId) await updateBatchGameName(item.batchId, newGameName);
                 await updateBatchSpoiler(item.batchId, item.id, newSpoiler);
+                await updateImageHidden(item.id, newHidden);
                 await updateAdditionalInfo(item.id, newAdditionalInfo);
                 await refreshGallery();
                 renderLightboxImage();
@@ -2338,37 +2504,56 @@ function openLightbox(batchItems, startIndex) {
                 existingSlider.remove();
                 lightboxSdrActive = false;
                 compareBtn.classList.remove('button-active');
-                compareBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12H3"/><path d="m7 8-4 4 4 4"/><path d="m17 8 4 4-4 4"/></svg><span class="btn-label"> <u>S</u>DR Slider</span>';
+                compareBtn.innerHTML = _compareBtnIconHTML();
                 // Restore analysis overlay and nit tooltip
                 const metaOverlay = imageWrapper.querySelector('.image-meta-overlay');
                 if (metaOverlay) metaOverlay.style.visibility = '';
+                updateAllDetailButtons(globalDetailsEnabled);
+                // Explicitly re-apply the correct image + pill state rather than
+                // assuming it's still correct after the slider closes.
+                _syncCompareDisplay();
                 return;
             }
             const { sdrUrl } = lightboxBlobUrls.get(item.id);
-            if (sdrUrl) {
-
+            // Slider layout is fixed by identity — item1 (this lightbox's own item)
+            // is always the left/overlay image, item2 (the compare target) is
+            // always the right/base image, matching the ?compare=id1,id2 URL order.
+            // This must NOT depend on lightboxCompareImageActive, which only tracks
+            // which image is currently shown as the full main image (via the
+            // separate swap/"D" button) — using it here was flipping the slider's
+            // left/right sides depending on unrelated toggle state.
+            const selectedImage = _compareTargetItem || item; // base (right side)
+            const otherImage = _compareTargetItem ? item : null; // overlay (left side)
+            const overlayUrl = otherImage ? otherImage.hdrUrl : sdrUrl;
+            if (overlayUrl) {
                 const slider = document.createElement('div');
                 slider.className = 'inline-comparison-slider lightbox-comparison-slider';
 
-                // No HDR img needed — imgEl underneath is the HDR layer
-                const sdrImg = document.createElement('img');
-                sdrImg.className = 'inline-comparison-sdr';
+                imgEl.src = selectedImage.hdrUrl;
+
+                const overlayImg = document.createElement('img');
+                overlayImg.className = 'inline-comparison-sdr';
+                overlayImg.src = overlayUrl;
 
                 const divider = document.createElement('div');
                 divider.className = 'inline-comparison-divider';
 
-                const sdrLabel = document.createElement('span');
-                sdrLabel.className = 'inline-comparison-label inline-comparison-label-sdr';
-                sdrLabel.textContent = 'SDR';
+                const leftLabel = document.createElement('span');
+                leftLabel.className = 'inline-comparison-label inline-comparison-label-sdr';
+                leftLabel.textContent = otherImage
+                    ? (otherImage.additionalInfo || otherImage.gameName || otherImage.name || 'Image 2')
+                    : 'SDR';
 
-                const hdrLabel = document.createElement('span');
-                hdrLabel.className = 'inline-comparison-label inline-comparison-label-hdr';
-                hdrLabel.textContent = 'HDR';
+                const rightLabel = document.createElement('span');
+                rightLabel.className = 'inline-comparison-label inline-comparison-label-hdr';
+                rightLabel.textContent = selectedImage
+                    ? (selectedImage.additionalInfo || selectedImage.gameName || selectedImage.name || 'Image 1')
+                    : 'HDR';
 
-                slider.appendChild(sdrImg);
+                slider.appendChild(overlayImg);
                 slider.appendChild(divider);
-                slider.appendChild(sdrLabel);
-                slider.appendChild(hdrLabel);
+                slider.appendChild(leftLabel);
+                slider.appendChild(rightLabel);
 
                 // Position slider to exactly cover imgEl's rendered rect
                 function positionSlider() {
@@ -2386,20 +2571,20 @@ function openLightbox(batchItems, startIndex) {
                         const scale = Math.min(vw / natW, vh / natH);
                         const imgW = natW * scale, imgH = natH * scale;
                         const imgLeft = (vw - imgW) / 2, imgTop = (vh - imgH) / 2;
-                        sdrLabel.style.left  = (imgLeft + 10) + 'px';
-                        sdrLabel.style.right = '';
-                        sdrLabel.style.top   = (imgTop  + 10) + 'px';
-                        hdrLabel.style.right = (vw - imgLeft - imgW + 10) + 'px';
-                        hdrLabel.style.left  = '';
-                        hdrLabel.style.top   = (imgTop  + 10) + 'px';
+                        leftLabel.style.left  = (imgLeft + 10) + 'px';
+                        leftLabel.style.right = '';
+                        leftLabel.style.top   = (imgTop  + 10) + 'px';
+                        rightLabel.style.right = (vw - imgLeft - imgW + 10) + 'px';
+                        rightLabel.style.left  = '';
+                        rightLabel.style.top   = (imgTop  + 10) + 'px';
                     } else {
                         // Reset labels to default CSS positioning
-                        sdrLabel.style.left  = '';
-                        sdrLabel.style.right = '';
-                        sdrLabel.style.top   = '';
-                        hdrLabel.style.right = '';
-                        hdrLabel.style.left  = '';
-                        hdrLabel.style.top   = '';
+                        leftLabel.style.left  = '';
+                        leftLabel.style.right = '';
+                        leftLabel.style.top   = '';
+                        rightLabel.style.right = '';
+                        rightLabel.style.left  = '';
+                        rightLabel.style.top   = '';
                         const rect = imgEl.getBoundingClientRect();
                         const containerRect = imgContainer.getBoundingClientRect();
                         slider.style.left   = (rect.left - containerRect.left) + 'px';
@@ -2426,11 +2611,11 @@ function openLightbox(batchItems, startIndex) {
                     function updateSlider(clientX) {
                         const rect = slider.getBoundingClientRect();
                         const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-                        sdrImg.style.clipPath = `inset(0 ${(1 - pct) * 100}% 0 0)`;
+                        overlayImg.style.clipPath = `inset(0 ${(1 - pct) * 100}% 0 0)`;
                         divider.style.left = `${pct * 100}%`;
                         const dividerX = pct * rect.width;
-                        sdrLabel.style.opacity = dividerX < LABEL_WIDTH ? '0' : '1';
-                        hdrLabel.style.opacity = dividerX > rect.width - LABEL_WIDTH ? '0' : '1';
+                        leftLabel.style.opacity = dividerX < LABEL_WIDTH ? '0' : '1';
+                        rightLabel.style.opacity = dividerX > rect.width - LABEL_WIDTH ? '0' : '1';
                     }
                     updateSlider(slider.getBoundingClientRect().left + slider.getBoundingClientRect().width * 0.5);
 
@@ -2467,7 +2652,7 @@ function openLightbox(batchItems, startIndex) {
                     };
                 }
 
-                sdrImg.onload = activateSlider;
+                overlayImg.onload = activateSlider;
                 // Snap to 1x if currently zoomed — keep zoom mode active, just reset scale/pan
                 if (imgEl.classList.contains('lightbox-image-zooming')) {
                     scrollZoomVelocity = 0;
@@ -2481,15 +2666,13 @@ function openLightbox(batchItems, startIndex) {
                     zoomTooltip.innerHTML = `<svg class="zoom-icon" xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>1.0× zoom`;
                 }
 
-                sdrImg.src = sdrUrl;
                 // If already cached, onload won't fire
-                if (sdrImg.complete && sdrImg.naturalWidth > 0) activateSlider();
+                if (overlayImg.complete && overlayImg.naturalWidth > 0) activateSlider();
 
                 lightboxSdrActive = true;
                 compareBtn.classList.add('button-active');
-                // Hide analysis overlay and nit tooltip while SDR slider is active
-                const metaOverlay = imageWrapper.querySelector('.image-meta-overlay');
-                if (metaOverlay) metaOverlay.style.visibility = 'hidden';
+                updateAllDetailButtons(globalDetailsEnabled);
+                // Keep the analysis overlay visible above the compare slider; only suppress the hover tooltip.
                 nitTooltip.style.display = 'none';
                 _nitsRow.style.display = 'none';
             } else {
@@ -2497,12 +2680,71 @@ function openLightbox(batchItems, startIndex) {
             }
         };
 
-        // Helper: update pill toggle visual state (sdrActive=true → SDR seg lit, false → HDR seg lit)
+        // Single source of truth for compare-mode display: sets the main image
+        // AND the pill highlight together from lightboxCompareImageActive. Call
+        // this any time the slider closes or compare mode needs re-syncing, so
+        // the image and the pill can never drift out of sync with each other.
+        function _syncCompareDisplay() {
+            if (!_compareTargetItem) return;
+            const activeItem = lightboxCompareImageActive ? _compareTargetItem : item;
+            imgEl.src = activeItem.hdrUrl;
+            currentVisibleImage = activeItem.id;
+
+            _setLightboxTitle(activeItem.gameName);
+            const _compareAdditionalInfo = activeItem.additionalInfo || '';
+            imageHeaderSubtitle.textContent = _compareAdditionalInfo;
+            imageHeaderSubtitle.style.display = _compareAdditionalInfo ? '' : 'none';
+
+            if (globalDetailsEnabled) {
+                lbPixelBuffer = null;
+                if (lbSdrMode) {
+                    _startSdrPixelDecode(activeItem);
+                    lightboxSdrPixelBuffers.get(activeItem.id)?.then(buf => {
+                        lbPixelBuffer = buf;
+                        if (lbMouseInside && globalDetailsEnabled && buf) {
+                            const { imgX, imgY } = cursorToPixel(lastCursorX, lastCursorY, buf);
+                            lbLastPixelX = imgX; lbLastPixelY = imgY;
+                            const _nitResult = _getNitsAtPixelSdr(buf, imgX, imgY);
+                            const { rNits, gNits, bNits, luminance, gamut } = _nitResult;
+                            nitTooltip.style.display = 'block';
+                            nitTooltip.innerHTML = _nitTooltipHTML(rNits, gNits, bNits, luminance, gamut);
+                        }
+                    });
+                } else {
+                    _startPixelDecode(activeItem);
+                    lightboxPixelBuffers.get(activeItem.id)?.then(buf => {
+                        lbPixelBuffer = buf;
+                        if (lbMouseInside && globalDetailsEnabled && buf) {
+                            const { imgX, imgY } = cursorToPixel(lastCursorX, lastCursorY, buf);
+                            lbLastPixelX = imgX; lbLastPixelY = imgY;
+                            const { rNits, gNits, bNits, luminance, gamut } = getNitsAtPixel(buf, imgX, imgY);
+                            nitTooltip.style.display = 'block';
+                            nitTooltip.innerHTML = _nitTooltipHTML(rNits, gNits, bNits, luminance, gamut);
+                        }
+                    });
+                }
+                showDetailsForImage(activeItem.id);
+            }
+
+            _setSdrPill();
+        }
+
+        // Helper: update pill toggle visual state for SDR/HDR or compare mode
         function _setSdrPill(sdrActive) {
-            sdrToggleBtn.classList.toggle('sdr-active', sdrActive);
-            sdrToggleBtn.querySelectorAll('.sdr-pill-seg').forEach(seg => {
-                seg.classList.toggle('sdr-pill-seg--active', sdrActive ? seg.dataset.seg === 'sdr' : seg.dataset.seg === 'hdr');
-            });
+            if (_compareTargetItem) {
+                // '.sdr-active' slides the pill highlight to the LEFT (image1) segment;
+                // its absence slides it to the RIGHT (image2) segment — so this must be
+                // the inverse of lightboxCompareImageActive (true = image2 showing).
+                sdrToggleBtn.classList.toggle('sdr-active', !lightboxCompareImageActive);
+                sdrToggleBtn.querySelectorAll('.sdr-pill-seg').forEach(seg => {
+                    seg.classList.toggle('sdr-pill-seg--active', seg.dataset.seg === (lightboxCompareImageActive ? 'image2' : 'image1'));
+                });
+            } else {
+                sdrToggleBtn.classList.toggle('sdr-active', sdrActive);
+                sdrToggleBtn.querySelectorAll('.sdr-pill-seg').forEach(seg => {
+                    seg.classList.toggle('sdr-pill-seg--active', sdrActive ? seg.dataset.seg === 'sdr' : seg.dataset.seg === 'hdr');
+                });
+            }
         }
 
         sdrToggleBtn.onclick = () => {
@@ -2513,7 +2755,31 @@ function openLightbox(batchItems, startIndex) {
                 existingSlider.remove();
                 lightboxSdrActive = false;
                 compareBtn.classList.remove('button-active');
-                compareBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12H3"/><path d="m7 8-4 4 4 4"/><path d="m17 8 4 4-4 4"/></svg><span class="btn-label"> <u>S</u>DR Slider</span>';
+                compareBtn.innerHTML = _compareBtnIconHTML();
+                // Restore analysis overlay visibility
+                const metaOverlay = imageWrapper.querySelector('.image-meta-overlay');
+                if (metaOverlay) metaOverlay.style.visibility = '';
+                // Disabling the slider should just close it and leave whichever
+                // image (1 or 2) was already selected via the toggle untouched —
+                // don't fall through and swap the compare image.
+                _syncCompareDisplay();
+                return;
+            }
+
+            if (_compareTargetItem) {
+                // Swap between compared images when ?compare= is active.
+                lightboxCompareImageActive = !lightboxCompareImageActive;
+                _syncCompareDisplay();
+                if (globalDetailsEnabled) {
+                    const activeItem = lightboxCompareImageActive ? _compareTargetItem : item;
+                    _startPixelDecode(activeItem);
+                    showDetailsForImage(activeItem.id);
+                    const imgElActive = document.querySelector('.lightbox-image');
+                    if (imgElActive && imgElActive.matches(':hover')) {
+                        imgElActive.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false }));
+                    }
+                }
+                return;
             }
 
             if (lightboxSdrToggleActive) {
@@ -2673,6 +2939,21 @@ function navigateLightbox(direction) {
 }
 
 function closeLightbox() {
+    const url = new URL(window.location);
+    if (url.searchParams.has('compare')) {
+        url.searchParams.delete('compare');
+    }
+    url.searchParams.delete('img');
+    if (gameSearchQuery.trim()) {
+        url.searchParams.set('game', gameSearchQuery.trim());
+    } else {
+        url.searchParams.delete('game');
+    }
+    history.pushState({}, '', url);
+
+    if (_compareTargetItem) {
+        _compareTargetItem = null;
+    }
     const overlay = document.getElementById('lightbox-overlay');
     if (overlay) {
         if (overlay._cleanupMouseUp) document.removeEventListener('mouseup', overlay._cleanupMouseUp);
@@ -2690,6 +2971,7 @@ function closeLightbox() {
     lightboxBatch = [];
     lightboxIndex = 0;
     lightboxSdrToggleActive = false;
+    lightboxCompareImageActive = false;
     lightboxSdrPixelBuffers.clear();
     _lightboxRender = null;
     _lightboxResetZoomIdleTimer = null;
@@ -2697,6 +2979,15 @@ function closeLightbox() {
     _arrowThrottleLast  = -Infinity;
     clearTimeout(_arrowThrottleTimer);
     _arrowThrottleTimer = null;
+    if (_lightboxHdrInfoBarMq) {
+        if (typeof _lightboxHdrInfoBarMq.removeEventListener === 'function') {
+            _lightboxHdrInfoBarMq.removeEventListener('change', _updateLightboxHdrInfoBar);
+        } else if (typeof _lightboxHdrInfoBarMq.removeListener === 'function') {
+            _lightboxHdrInfoBarMq.removeListener(_updateLightboxHdrInfoBar);
+        }
+    }
+    _lightboxHdrInfoBarMq = null;
+    _lightboxHdrInfoBar = null;
     globalDetailsEnabled = false;
     nitTooltip.style.display = 'none';
     zoomTooltip.style.display = 'none';
@@ -3466,6 +3757,10 @@ function showImportModal(fileCount, files = []) {
                     <input type="checkbox" class="modal-spoiler-checkbox" />
                     Mark as spoiler
                 </label>
+                <label class="modal-spoiler-label modal-hidden-label">
+                    <input type="checkbox" class="modal-hidden-checkbox" />
+                    Hide from galleries &amp; search
+                </label>
             </div>
             <div class="modal-footer">
                 <button class="button-secondary modal-cancel">Cancel</button>
@@ -3496,12 +3791,13 @@ function showImportModal(fileCount, files = []) {
 
         importBtn.onclick = () => {
             const spoiler = modal.querySelector('.modal-spoiler-checkbox').checked;
+            const hidden = modal.querySelector('.modal-hidden-checkbox').checked;
             const additionalInfo = modal.querySelector('.modal-additional-info-input').value.trim() || null;
             document.body.style.overflow = '';
             document.documentElement.style.overflow = '';
             overlay.remove();
             document.removeEventListener('keydown', onImportKeydown, true);
-            resolve({ hdrType: hdrDropdown.getValue() ?? 'unknown', gameName: selectedGameName, spoiler, additionalInfo });
+            resolve({ hdrType: hdrDropdown.getValue() ?? 'unknown', gameName: selectedGameName, spoiler, hidden, additionalInfo });
         };
 
         let importMousedownOnModal = false;
@@ -3537,7 +3833,7 @@ function showImportModal(fileCount, files = []) {
 
 // ─── Edit Modal ───────────────────────────────────────────────────────────────
 
-function showEditModal(currentHdrType, currentGameName, currentSpoiler, thumbUrl, currentAdditionalInfo) {
+function showEditModal(currentHdrType, currentGameName, currentSpoiler, thumbUrl, currentAdditionalInfo, currentHidden) {
     return new Promise((resolve) => {
         const overlay = document.createElement('div');
         overlay.className = 'modal-overlay';
@@ -3577,6 +3873,10 @@ function showEditModal(currentHdrType, currentGameName, currentSpoiler, thumbUrl
                 <label class="modal-spoiler-label">
                     <input type="checkbox" class="modal-spoiler-checkbox" ${currentSpoiler ? 'checked' : ''} />
                     Mark as spoiler
+                </label>
+                <label class="modal-spoiler-label modal-hidden-label">
+                    <input type="checkbox" class="modal-hidden-checkbox" ${currentHidden ? 'checked' : ''} />
+                    Hide from galleries &amp; search
                 </label>
             </div>
             <div class="modal-footer">
@@ -3620,12 +3920,13 @@ function showEditModal(currentHdrType, currentGameName, currentSpoiler, thumbUrl
 
         saveBtn.onclick = () => {
             const spoiler = modal.querySelector('.modal-spoiler-checkbox').checked;
+            const hidden = modal.querySelector('.modal-hidden-checkbox').checked;
             const additionalInfo = modal.querySelector('.modal-additional-info-input').value.trim() || null;
             document.body.style.overflow = '';
             document.documentElement.style.overflow = '';
             overlay.remove();
             document.removeEventListener('keydown', onModalKeydown, true);
-            resolve({ hdrType: hdrDropdown.getValue() ?? 'unknown', gameName: selectedGameName, spoiler, additionalInfo });
+            resolve({ hdrType: hdrDropdown.getValue() ?? 'unknown', gameName: selectedGameName, spoiler, hidden, additionalInfo });
         };
 
         let editMousedownOnModal = false;
@@ -4007,6 +4308,8 @@ document.addEventListener('keydown', (e) => {
     // Toggle Analysis Tool with 'A' key
     if (e.key === 'a' || e.key === 'A') {
         e.preventDefault();
+        const hasActiveCompareSlider = !!document.querySelector('#lightbox-overlay .inline-comparison-slider');
+        if (hasActiveCompareSlider && !globalDetailsEnabled && !_compareTargetItem) return;
         toggleGlobalDetailsMode();
     }
 

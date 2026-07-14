@@ -49,20 +49,30 @@
     <script src="script.js"></script>
     <script>
         const hdrMq = window.matchMedia('(dynamic-range: high)');
+        const hdrInfoBarEl = document.getElementById('hdrInfoBar');
+        const sdrInfoBarEl = document.getElementById('sdrInfoBar');
 
         function updateHdrBars() {
-            const isHdr = hdrMq.matches;
-            document.getElementById('hdrInfoBar').style.display = isHdr ? 'flex' : 'none';
-            document.getElementById('sdrInfoBar').style.display = isHdr ? 'none' : 'flex';
+            const isHdrSignalDetected = hdrMq.matches;
+            hdrInfoBarEl.style.display = isHdrSignalDetected ? 'flex' : 'none';
+            sdrInfoBarEl.style.display = isHdrSignalDetected ? 'none' : 'flex';
         }
 
         updateHdrBars();
-        hdrMq.addEventListener('change', updateHdrBars);
+
+        if (typeof hdrMq.addEventListener === 'function') {
+            hdrMq.addEventListener('change', updateHdrBars);
+        } else if (typeof hdrMq.addListener === 'function') {
+            hdrMq.addListener(updateHdrBars);
+        }
 
         let _lastHdr = hdrMq.matches;
         setInterval(() => {
-            const isHdr = hdrMq.matches;
-            if (isHdr !== _lastHdr) { _lastHdr = isHdr; updateHdrBars(); }
+            const isHdrSignalDetected = hdrMq.matches;
+            if (isHdrSignalDetected !== _lastHdr) {
+                _lastHdr = isHdrSignalDetected;
+                updateHdrBars();
+            }
         }, 2000);
 
         // Tooltip positioning — getBoundingClientRect on mouseenter so coords are always fresh

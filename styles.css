@@ -37,6 +37,19 @@
     color: #f87171;
 }
 
+.lightbox-hdr-info-bar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 2000;
+    border-radius: 0;
+    padding: 2px 14px;
+    backdrop-filter: blur(8px);
+    pointer-events: none;
+    width: 100%;
+}
+
 /* Settings path tooltip */
 .hdr-info-path-tip {
     display: inline-block;
@@ -106,6 +119,7 @@
     text-decoration-style: dashed;
     text-decoration-color: rgba(248, 113, 113, 0.4);
     text-underline-offset: 3px;
+    pointer-events: auto;
 }
 
 .sdr-browser-tooltip {
@@ -120,7 +134,7 @@
     padding: 8px 12px;
     border-radius: 5px;
     pointer-events: none;
-    z-index: 1000;
+    z-index: 4000;
     box-shadow: 0 4px 12px rgba(0,0,0,0.5);
     display: none;
     flex-direction: column;
@@ -774,6 +788,18 @@ button.button-active:active {
     box-shadow: 0 2px 5px rgba(43, 108, 255, 0.3);
 }
 
+button.detail-button--blocked {
+    opacity: 0.30;
+    filter: grayscale(0.35);
+}
+
+button.detail-button--blocked:hover {
+    background: #0d0d0f;
+    border-color: #444;
+    transform: none;
+    box-shadow: none;
+}
+
 /* ─── Nit Hunt (per-pixel luminance sampler) ────────────────────────────────── */
 
 /* Crosshair cursor with black outline for visibility on bright image areas */
@@ -903,7 +929,7 @@ button.button-active:active {
 .image-meta-overlay {
     position: absolute;
     inset: 0;
-    z-index: 20;
+    z-index: 2052;
     pointer-events: none;
     border-radius: 4px;
     overflow: visible;
@@ -1259,6 +1285,26 @@ button.button-active:active {
     white-space: nowrap;
 }
 
+.collage-hidden-badge {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #f87171;
+    background: rgba(220, 60, 60, 0.15);
+    border: 1px solid rgba(220, 60, 60, 0.35);
+    padding: 2px 8px;
+    border-radius: 20px;
+    white-space: nowrap;
+    flex-shrink: 0;
+    margin-left: 8px;
+}
+
+.collage-hidden-badge svg {
+    flex-shrink: 0;
+}
+
 .collage-title-count-badge svg {
     display: inline-block;
     vertical-align: middle;
@@ -1546,6 +1592,29 @@ button.button-active:active {
 }
 
 .modal-spoiler-label:has(.modal-spoiler-checkbox:checked)::before {
+    background: #5765f2;
+    border-color: #5765f2;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath d='M2 5l2.5 2.5L8 3' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E");
+    background-size: 10px;
+    background-repeat: no-repeat;
+    background-position: center;
+}
+
+.modal-hidden-checkbox {
+    display: none;
+}
+
+.modal-hidden-label {
+    margin-top: 2px;
+}
+
+.modal-hidden-label:has(.modal-hidden-checkbox:checked) {
+    background: rgba(87, 101, 242, 0.1);
+    color: #b0b8fa;
+    font-weight: 600;
+}
+
+.modal-hidden-label:has(.modal-hidden-checkbox:checked)::before {
     background: #5765f2;
     border-color: #5765f2;
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath d='M2 5l2.5 2.5L8 3' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E");
@@ -2436,8 +2505,14 @@ button.button-active:active {
 }
 
 /* ── Toolbar button tooltip ── */
+.lightbox-toolbar {
+    position: relative;
+    z-index: 2200;
+}
+
 .lightbox-toolbar button[data-tooltip] {
     position: relative;
+    z-index: 1;
 }
 
 .lightbox-toolbar button[data-tooltip]::after {
@@ -2457,7 +2532,7 @@ button.button-active:active {
     pointer-events: none;
     opacity: 0;
     transition: opacity 0.15s ease;
-    z-index: 9999;
+    z-index: 2201;
 }
 
 .lightbox-toolbar button[data-tooltip]:hover::after {

@@ -81,7 +81,7 @@ function generateBatchId() {
 
 // Upload all three blobs to Cloudinary, then store the URLs + metadata in Firestore.
 // Returns the new Firestore document ID (string).
-async function addImageFile(file, metadata = null, sdrBlob = null, hdrType = null, batchId = null, thumbBlob = null, gameName = null, spoiler = false, additionalInfo = null, sdrLuminanceStats = null) {
+async function addImageFile(file, metadata = null, sdrBlob = null, hdrType = null, batchId = null, thumbBlob = null, gameName = null, spoiler = false, additionalInfo = null, sdrLuminanceStats = null, hidden = false) {
     const uid  = await _getUid();
     const base = file.name.replace(/\.[^.]+$/, '');
 
@@ -107,6 +107,7 @@ async function addImageFile(file, metadata = null, sdrBlob = null, hdrType = nul
         batchId:            batchId            ?? null,
         gameName:           gameName           ?? null,
         spoiler:            spoiler            ?? false,
+        hidden:             hidden             ?? false,
         additionalInfo:     additionalInfo     ?? null,
         sdrLuminanceStats:  sdrLuminanceStats  ?? null,
         hdrUrl:             hdr.url,
@@ -165,6 +166,10 @@ async function updateBatchSpoiler(batchId, id, spoiler) {
     } else {
         await _col.doc(id).update({ spoiler });
     }
+}
+
+async function updateImageHidden(id, hidden) {
+    await _col.doc(id).update({ hidden: hidden ?? false });
 }
 
 async function updateBatchGameName(batchId, gameName) {
