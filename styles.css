@@ -848,6 +848,13 @@ button.detail-button--blocked:hover {
     display: block;
 }
 
+/* Analysis Tool active over the compare slider: crosshair everywhere except
+   near the drag handle (handled in JS via proximity to the divider), where
+   the default ew-resize cursor is kept so the handle still reads as draggable. */
+.inline-comparison-slider.cursor-nit-hunt {
+    cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cline x1='12' y1='2' x2='12' y2='10' stroke='black' stroke-width='5' stroke-linecap='round'/%3E%3Cline x1='12' y1='14' x2='12' y2='22' stroke='black' stroke-width='5' stroke-linecap='round'/%3E%3Cline x1='2' y1='12' x2='10' y2='12' stroke='black' stroke-width='5' stroke-linecap='round'/%3E%3Cline x1='14' y1='12' x2='22' y2='12' stroke='black' stroke-width='5' stroke-linecap='round'/%3E%3Cline x1='12' y1='2' x2='12' y2='10' stroke='white' stroke-width='1.5' stroke-linecap='round'/%3E%3Cline x1='12' y1='14' x2='12' y2='22' stroke='white' stroke-width='1.5' stroke-linecap='round'/%3E%3Cline x1='2' y1='12' x2='10' y2='12' stroke='white' stroke-width='1.5' stroke-linecap='round'/%3E%3Cline x1='14' y1='12' x2='22' y2='12' stroke='white' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E") 12 12, crosshair !important;
+}
+
 /* HDR layer is the base — its natural size drives the container height */
 .inline-comparison-hdr {
     display: block;
@@ -923,6 +930,38 @@ button.detail-button--blocked:hover {
     border-color: #f5c518;
 }
 
+/* Simplified variant used only in the compare-lightbox (two different images
+   side by side) — plain text over the image instead of a bordered badge.
+   The regular same-image SDR/HDR toggle keeps the badge style above. */
+.inline-comparison-label.inline-comparison-label--compare {
+    background: none;
+    border: none;
+    padding: 0;
+    letter-spacing: normal;
+    font-weight: 600;
+    font-size: 12px;
+    color: #fff;
+    text-shadow: 0 1px 3px rgba(0,0,0,0.85), 0 0 10px rgba(0,0,0,0.5);
+}
+
+.inline-comparison-label-sdr.inline-comparison-label--compare {
+    color: #ddd;
+    top: 50%;
+    left: 0;
+    right: auto;
+    transform: translate(-100%, -50%);
+    white-space: nowrap;
+}
+
+.inline-comparison-label-hdr.inline-comparison-label--compare {
+    color: #f5c518;
+    top: 50%;
+    left: 0;
+    right: auto;
+    transform: translateY(-50%);
+    white-space: nowrap;
+}
+
 /* ─── Metadata Overlay Panels ───────────────────────────────────────────────── */
 
 /* Full-image overlay; pointer-events:none lets clicks pass through to the image */
@@ -955,6 +994,12 @@ button.detail-button--blocked:hover {
     cursor: grab;
     font-weight: 500;
     font-family: var(--bs-body-font-family);
+    transition: opacity 150ms ease;
+}
+
+.imo-panel.imo-panel-zoom-hidden {
+    opacity: 0;
+    pointer-events: none;
 }
 
 .cursor-nit-hunt .imo-panel {

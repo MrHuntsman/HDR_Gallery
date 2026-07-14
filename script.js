@@ -369,6 +369,12 @@ function toggleGlobalDetailsMode() {
                     currentVisibleImage = detailsTarget.id;
                     console.log(`[imo] normal path, detailsTarget=${detailsTarget.id}, wrapperExists=${imageWrappers.has(detailsTarget.id)}`);
                     _startPixelDecode(detailsTarget);
+                    if (_compareTargetItem) {
+                        // Dual-image compare: decode both sides so the nit tooltip can
+                        // switch buffers as the cursor crosses the slider divider.
+                        _startPixelDecode(currentItem);
+                        _startPixelDecode(_compareTargetItem);
+                    }
                     showDetailsForImage(currentVisibleImage);
                     const imgElActive = document.querySelector('.lightbox-image');
                     if (imgElActive && imgElActive.matches(':hover')) {
@@ -937,6 +943,11 @@ let lightboxIndex = 0;
 let _lbOpenTime = 0;
 let lightboxPixelBuffers = new Map(); // imageId → buffer promise (HDR)
 let lightboxSdrPixelBuffers = new Map(); // imageId → buffer promise (SDR)
+// Sync-readable caches mirroring the two maps above (populated once each promise
+// resolves). Needed so the compare-slider nit tooltip can pick the correct
+// buffer per mousemove event without awaiting a promise every frame.
+let lightboxPixelBufferValues = new Map();
+let lightboxSdrPixelBufferValues = new Map();
 let lightboxSdrActive = false;
 let lightboxSdrToggleActive = false; // full SDR view (no slider)
 let lightboxCompareImageActive = false; // toggles full compare image display when ?compare= is active
@@ -997,6 +1008,7 @@ function _startPixelDecode(item) {
         };
     });
     lightboxPixelBuffers.set(item.id, p);
+    p.then(buf => { if (buf) lightboxPixelBufferValues.set(item.id, buf); });
 }
 
 // Lazily start pixel decode for the SDR version of an item.
@@ -1019,6 +1031,7 @@ function _startSdrPixelDecode(item) {
         worker.onerror = () => { worker.terminate(); resolve(null); };
     });
     lightboxSdrPixelBuffers.set(item.id, p);
+    p.then(buf => { if (buf) lightboxSdrPixelBufferValues.set(item.id, buf); });
 }
 
 // sRGB EOTF: gamma-encoded [0,1] → linear, then scale to cd/m²
@@ -1270,7 +1283,7 @@ function openLightbox(batchItems, startIndex) {
     imageHeaderSubtitle.className = 'lightbox-image-header-subtitle';
     const _initAdditionalInfo = lightboxBatch[startIndex].additionalInfo || '';
     imageHeaderSubtitle.textContent = _initAdditionalInfo;
-    imageHeaderSubtitle.style.display = _initAdditionalInfo ? '' : 'none';
+    imageHeaderSubtitle.style.display = (_initAdditionalInfo && !_compareTargetItem) ? '' : 'none';
 
     const imageHeaderTitleWrap = document.createElement('div');
     imageHeaderTitleWrap.className = 'lightbox-image-header-title-wrap';
@@ -1527,6 +1540,52 @@ function openLightbox(batchItems, startIndex) {
     let isZooming = false;
     let currentZoomScale = CONFIG.zoomScale;
 
+    // [imo-zoom-fix] The image container's size is normally determined by the
+    // <img> sitting inside it. Once the image switches to `position: fixed`
+    // for zoom, it leaves the container's flow and the container collapses to
+    // 0x0, which drags the .image-meta-overlay / .imo-panel (positioned
+    // relative to it) along with it. Locking the container's box to its
+    // current rendered size before the image escapes prevents the collapse,
+    // and we release the lock once zoom ends.
+    function _lockZoomContainerSize() {
+        const container = imageWrapper.querySelector('.lightbox-image-container');
+        if (!container) return;
+        const rect = container.getBoundingClientRect();
+        container.style.width  = rect.width + 'px';
+        container.style.height = rect.height + 'px';
+        // Hide the imo panel(s) while zoomed — it isn't useful over a zoomed
+        // image and its (now-static) position stops tracking the zoomed view.
+        imageWrapper.querySelectorAll('.imo-panel').forEach(p => p.classList.add('imo-panel-zoom-hidden'));
+    }
+    function _unlockZoomContainerSize() {
+        const container = imageWrapper.querySelector('.lightbox-image-container');
+        if (!container) return;
+        container.style.width  = '';
+        container.style.height = '';
+        imageWrapper.querySelectorAll('.imo-panel').forEach(p => p.classList.remove('imo-panel-zoom-hidden'));
+    }
+
+    // [imo-zoom-debug] Logs the rects of the image container / imo overlay / imo
+    // panel so we can see whether the container collapses (and drags the panel
+    // with it) when the image switches to position:fixed during zoom.
+    function _logImoZoomRects(label) {
+        const container = imageWrapper.querySelector('.lightbox-image-container');
+        const overlay   = imageWrapper.querySelector('.image-meta-overlay');
+        const panel     = imageWrapper.querySelector('.imo-panel');
+        const r = (el) => {
+            if (!el) return 'null';
+            const rect = el.getBoundingClientRect();
+            return `x=${Math.round(rect.x)} y=${Math.round(rect.y)} w=${Math.round(rect.width)} h=${Math.round(rect.height)}`;
+        };
+        console.log(
+            `[imo-zoom-debug] ${label} | imgPosition=${getComputedStyle(imgEl).position}` +
+            ` | container(${r(container)})` +
+            ` | overlay(${r(overlay)})` +
+            ` | panel(${r(panel)})` +
+            ` | panelInline(left=${panel ? panel.style.left : 'n/a'}, top=${panel ? panel.style.top : 'n/a'})`
+        );
+    }
+
     // ── Scroll-to-zoom (velocity + friction momentum) ──
     // Uses translate(tx, ty) scale(S) with transformOrigin: 0 0 — the standard
     // Photoshop/Figma model. State: (zoomTx, zoomTy, scrollZoomCurrent).
@@ -1651,6 +1710,7 @@ function openLightbox(batchItems, startIndex) {
         zoomTooltip.style.display = 'none';
         _clearZoomIdleTimer();
 
+        _logImoZoomRects('startZoomExit: BEFORE removing lightbox-image-zooming');
         let finished = false;
         const finish = () => {
             if (finished) return;
@@ -1662,6 +1722,9 @@ function openLightbox(batchItems, startIndex) {
             imgEl.style.transition = '';
             imgEl.style.transform = '';
             imgEl.style.transformOrigin = '';
+            _unlockZoomContainerSize();
+            _logImoZoomRects('startZoomExit: AFTER removing lightbox-image-zooming (same tick)');
+            requestAnimationFrame(() => _logImoZoomRects('startZoomExit: AFTER 1 rAF (post-layout)'));
         };
 
         if (naturalRect) {
@@ -1768,6 +1831,8 @@ function openLightbox(batchItems, startIndex) {
 
         // Capture natural rect, switch to fixed, apply FLIP inverse instantly
         naturalRect = imgEl.getBoundingClientRect();
+        _logImoZoomRects('mousedown hold-zoom: BEFORE adding lightbox-image-zooming');
+        _lockZoomContainerSize();
         const { tx: ftx, ty: fty, s: fs } = _flipTransform(naturalRect);
         imgEl.classList.add('lightbox-image-zooming');
         imgEl.style.cursor = 'zoom-out';
@@ -1776,6 +1841,8 @@ function openLightbox(batchItems, startIndex) {
         imgEl.style.transform = `translate(${ftx}px,${fty}px) scale(${fs})`;
         zoomTooltip.innerHTML = `<svg class="zoom-icon" xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>1.0× zoom`;
         if (lbMouseInside) zoomTooltip.style.display = 'block';
+        _logImoZoomRects('mousedown hold-zoom: AFTER adding lightbox-image-zooming (same tick)');
+        requestAnimationFrame(() => _logImoZoomRects('mousedown hold-zoom: AFTER 1 rAF (post-layout)'));
 
         // Animate to 1× centered — translate(0,0) scale(1) is identical to the wheel-entry
         // target and guarantees the image fits inside the visible viewport at every screen size.
@@ -1787,6 +1854,7 @@ function openLightbox(batchItems, startIndex) {
                 setTimeout(() => {
                     imgEl.style.transition = 'none';
                     startScrollZoomRaf();
+                    _logImoZoomRects('mousedown hold-zoom: zoom settled at 1x');
                 }, 190);
             });
         });
@@ -1849,6 +1917,8 @@ function openLightbox(batchItems, startIndex) {
 
                 // Capture natural rect, switch to fixed layout, apply FLIP inverse instantly
                 naturalRect = imgEl.getBoundingClientRect();
+                _logImoZoomRects('wheel scroll-zoom: BEFORE adding lightbox-image-zooming');
+                _lockZoomContainerSize();
                 const { tx: ftx, ty: fty, s: fs } = _flipTransform(naturalRect);
                 imgEl.classList.add('lightbox-image-zooming');
                 imgEl.style.cursor = 'zoom-out';
@@ -1856,6 +1926,8 @@ function openLightbox(batchItems, startIndex) {
                 imgEl.style.transition = 'none';
                 imgEl.style.transformOrigin = '0 0';
                 imgEl.style.transform = `translate(${ftx}px,${fty}px) scale(${fs})`;
+                _logImoZoomRects('wheel scroll-zoom: AFTER adding lightbox-image-zooming (same tick)');
+                requestAnimationFrame(() => _logImoZoomRects('wheel scroll-zoom: AFTER 1 rAF (post-layout)'));
 
                 // Double-rAF: first frame commits the FLIP inverse, second starts the transition
                 requestAnimationFrame(() => {
@@ -1865,6 +1937,7 @@ function openLightbox(batchItems, startIndex) {
                         setTimeout(() => {
                             imgEl.style.transition = 'none';
                             startScrollZoomRaf();
+                            _logImoZoomRects('wheel scroll-zoom: zoom settled at 1x');
                         }, 190);
                     });
                 });
@@ -1914,8 +1987,8 @@ function openLightbox(batchItems, startIndex) {
     // Invert transform: transformOrigin:0 0, translate(zoomTx,zoomTy) scale(S)
     // viewport point P → pre-transform point: P_pre = (P - translate) / S
     function cursorToPixel(clientX, clientY, buf) {
-        const natW = imgEl.naturalWidth  || buf.width;
-        const natH = imgEl.naturalHeight || buf.height;
+        const natW = buf?.width  || imgEl.naturalWidth;
+        const natH = buf?.height || imgEl.naturalHeight;
 
         if (imgEl.classList.contains('lightbox-image-zooming')) {
             const vw = window.innerWidth;
@@ -1941,6 +2014,21 @@ function openLightbox(batchItems, startIndex) {
                 imgY: Math.max(0, Math.min(natH - 1, Math.floor((clientY - rect.top)  * (natH / rect.height)))),
             };
         }
+    }
+
+    // When the compare slider shows two different images (via ?compare=), figure
+    // out which one is actually visible under the cursor — left of the divider
+    // shows lightboxBatch[lightboxIndex] (item1), right shows _compareTargetItem
+    // (item2), matching the fixed layout set up in compareBtn.onclick. Returns
+    // null when there's no dual-image compare active (single-item SDR slider, etc).
+    function _compareSideItemAt(clientX) {
+        if (!_compareTargetItem) return null;
+        const sliderEl = imageWrapper.querySelector('.inline-comparison-slider');
+        const dividerEl = sliderEl?.querySelector('.inline-comparison-divider');
+        if (!dividerEl) return null;
+        const dRect = dividerEl.getBoundingClientRect();
+        const splitX = dRect.left + dRect.width / 2;
+        return clientX < splitX ? lightboxBatch[lightboxIndex] : _compareTargetItem;
     }
 
     // ── Idle cursor/tooltip hide in zoom mode ──
@@ -1997,8 +2085,19 @@ function openLightbox(batchItems, startIndex) {
             }
         }
         if (!globalDetailsEnabled) return;
-        const _curItem = _getVisibleLightboxItem() || lightboxBatch[lightboxIndex];
-        if (!lbPixelBuffer) {
+        const _curItem = _compareSideItemAt(lastCursorX) || _getVisibleLightboxItem() || lightboxBatch[lightboxIndex];
+        if (_compareTargetItem) {
+            // Make sure both compared images are decoding — needed so mousemove
+            // can switch buffers instantly as the cursor crosses the divider.
+            if (lbSdrMode) {
+                _startSdrPixelDecode(lightboxBatch[lightboxIndex]);
+                _startSdrPixelDecode(_compareTargetItem);
+            } else {
+                _startPixelDecode(lightboxBatch[lightboxIndex]);
+                _startPixelDecode(_compareTargetItem);
+            }
+        }
+        if (!lbPixelBuffer || (_compareTargetItem && lbPixelBuffer !== (lbSdrMode ? lightboxSdrPixelBufferValues.get(_curItem.id) : lightboxPixelBufferValues.get(_curItem.id)))) {
             const bufPromise = lbSdrMode
                 ? lightboxSdrPixelBuffers.get(_curItem.id)
                 : lightboxPixelBuffers.get(_curItem.id);
@@ -2030,11 +2129,30 @@ function openLightbox(batchItems, startIndex) {
     imgEl.addEventListener('mousemove', (e) => {
         // Reset idle timer on any movement in zoom mode (not analysis mode)
         _resetZoomIdleTimer();
-        if (!lbPixelBuffer || !globalDetailsEnabled) return;
-        const _curItem = _getVisibleLightboxItem() || lightboxBatch[lightboxIndex];
-        if (_curItem?.id !== currentVisibleImage) {
-            lbPixelBuffer = null;
+        if (!globalDetailsEnabled) return;
+
+        if (_compareTargetItem) {
+            // Dual-image compare: switch buffers live as the cursor crosses the
+            // divider, instead of only following whichever image the D-toggle
+            // last selected.
+            const sideItem = _compareSideItemAt(e.clientX);
+            const sideBuf = sideItem
+                ? (lbSdrMode ? lightboxSdrPixelBufferValues.get(sideItem.id) : lightboxPixelBufferValues.get(sideItem.id))
+                : null;
+            if (sideBuf) {
+                lbPixelBuffer = sideBuf;
+            } else if (!lbPixelBuffer) {
+                return; // that side hasn't finished decoding yet
+            }
+        } else {
+            if (!lbPixelBuffer) return;
+            const _curItem = _getVisibleLightboxItem() || lightboxBatch[lightboxIndex];
+            if (_curItem?.id !== currentVisibleImage) {
+                lbPixelBuffer = null;
+                return;
+            }
         }
+
         lbRafPending = true;
         requestAnimationFrame(() => {
             lbRafPending = false;
@@ -2078,6 +2196,7 @@ function openLightbox(batchItems, startIndex) {
                 naturalRect = imgEl.getBoundingClientRect();
                 scrollZoomCurrent = 1; zoomTx = 0; zoomTy = 0;
                 _touchPinchStartScale = 1;
+                _lockZoomContainerSize();
                 imgEl.classList.add('lightbox-image-zooming');
                 imgEl.style.transition      = 'none';
                 imgEl.style.transformOrigin = '0 0';
@@ -2193,6 +2312,7 @@ function openLightbox(batchItems, startIndex) {
             isPanning = false; _touchPanActive = false; _touchPinchActive = false;
             imgEl.classList.remove('lightbox-image-zooming');
             imgEl.style.transform = ''; imgEl.style.transformOrigin = ''; imgEl.style.transition = '';
+            _unlockZoomContainerSize();
             zoomTooltip.style.display = 'none';
             _clearZoomIdleTimer();
         }
@@ -2241,6 +2361,7 @@ function openLightbox(batchItems, startIndex) {
         imgEl.style.transformOrigin = '';
         imgEl.style.transition = '';
         imgEl.classList.remove('lightbox-image-zooming');
+        _unlockZoomContainerSize();
         zoomTooltip.style.display = 'none';
         _clearZoomIdleTimer();
 
@@ -2379,7 +2500,7 @@ function openLightbox(batchItems, startIndex) {
         _setLightboxTitle(item.gameName);
         const _navAdditionalInfo = item.additionalInfo || '';
         imageHeaderSubtitle.textContent = _navAdditionalInfo;
-        imageHeaderSubtitle.style.display = _navAdditionalInfo ? '' : 'none';
+        imageHeaderSubtitle.style.display = (_navAdditionalInfo && !_compareTargetItem) ? '' : 'none';
         const hdrTypeDef = HDR_TYPES.find(t => t.id === item.hdrType);
         let lbHdrLabel = null;
         let lbHdrClass = '';
@@ -2469,7 +2590,7 @@ function openLightbox(batchItems, startIndex) {
             _setLightboxTitle(newGameName);
             const _editAdditionalInfo = newAdditionalInfo || '';
             imageHeaderSubtitle.textContent = _editAdditionalInfo;
-            imageHeaderSubtitle.style.display = _editAdditionalInfo ? '' : 'none';
+            imageHeaderSubtitle.style.display = (_editAdditionalInfo && !_compareTargetItem) ? '' : 'none';
             try {
                 await updateImageHdrType(item.id, newHdrType);
                 if (item.batchId) await updateBatchGameName(item.batchId, newGameName);
@@ -2561,14 +2682,14 @@ function openLightbox(batchItems, startIndex) {
                 divider.className = 'inline-comparison-divider';
 
                 const leftLabel = document.createElement('span');
-                leftLabel.className = 'inline-comparison-label inline-comparison-label-sdr';
+                leftLabel.className = 'inline-comparison-label inline-comparison-label-sdr' + (otherImage ? ' inline-comparison-label--compare' : '');
                 leftLabel.textContent = otherImage
                     ? (otherImage.additionalInfo || otherImage.gameName || otherImage.name || 'Image 2')
                     : 'SDR';
 
                 const rightLabel = document.createElement('span');
-                rightLabel.className = 'inline-comparison-label inline-comparison-label-hdr';
-                rightLabel.textContent = selectedImage
+                rightLabel.className = 'inline-comparison-label inline-comparison-label-hdr' + (otherImage ? ' inline-comparison-label--compare' : '');
+                rightLabel.textContent = otherImage
                     ? (selectedImage.additionalInfo || selectedImage.gameName || selectedImage.name || 'Image 1')
                     : 'HDR';
 
@@ -2629,6 +2750,8 @@ function openLightbox(batchItems, startIndex) {
 
                     let isDragging = false;
                     const LABEL_WIDTH = 70;
+                    const HANDLE_RADIUS = 22; // ~ the 40px handle circle plus a little slack
+                    const LABEL_GAP = 12;
 
                     function updateSlider(clientX) {
                         const rect = slider.getBoundingClientRect();
@@ -2636,8 +2759,15 @@ function openLightbox(batchItems, startIndex) {
                         overlayImg.style.clipPath = `inset(0 ${(1 - pct) * 100}% 0 0)`;
                         divider.style.left = `${pct * 100}%`;
                         const dividerX = pct * rect.width;
-                        leftLabel.style.opacity = dividerX < LABEL_WIDTH ? '0' : '1';
-                        rightLabel.style.opacity = dividerX > rect.width - LABEL_WIDTH ? '0' : '1';
+                        if (otherImage) {
+                            // Compare-lightbox labels ride alongside the drag handle,
+                            // vertically centered, rather than sitting in fixed corners.
+                            leftLabel.style.left = `${dividerX - HANDLE_RADIUS - LABEL_GAP}px`;
+                            rightLabel.style.left = `${dividerX + HANDLE_RADIUS + LABEL_GAP}px`;
+                        } else {
+                            leftLabel.style.opacity = dividerX < LABEL_WIDTH ? '0' : '1';
+                            rightLabel.style.opacity = dividerX > rect.width - LABEL_WIDTH ? '0' : '1';
+                        }
                     }
                     updateSlider(slider.getBoundingClientRect().left + slider.getBoundingClientRect().width * 0.5);
 
@@ -2646,17 +2776,30 @@ function openLightbox(batchItems, startIndex) {
                     const onTouchMove  = (e) => { if (isDragging) { updateSlider(e.touches[0].clientX); e.preventDefault(); } };
                     const onTouchEnd   = () => { isDragging = false; };
 
-                    slider.addEventListener('mousedown', (e) => { isDragging = true; updateSlider(e.clientX); e.preventDefault(); });
+                    slider.addEventListener('mousedown', (e) => { isDragging = true; slider.classList.remove('cursor-nit-hunt'); updateSlider(e.clientX); e.preventDefault(); });
                     document.addEventListener('mousemove', onMouseMove);
                     document.addEventListener('mouseup',   onMouseUp);
                     slider.addEventListener('touchstart', (e) => { isDragging = true; updateSlider(e.touches[0].clientX); }, { passive: true });
                     document.addEventListener('touchmove', onTouchMove, { passive: false });
                     document.addEventListener('touchend',  onTouchEnd);
 
+                    // While Analysis Tool is active, show the nit-hunt crosshair over the
+                    // slider too — except near the drag handle, where we keep ew-resize
+                    // so the viewer still knows that spot is draggable.
+                    function _updateSliderCursor(clientX) {
+                        if (!globalDetailsEnabled || isDragging) {
+                            slider.classList.remove('cursor-nit-hunt');
+                            return;
+                        }
+                        const dRect = divider.getBoundingClientRect();
+                        const dCenter = dRect.left + dRect.width / 2;
+                        slider.classList.toggle('cursor-nit-hunt', Math.abs(clientX - dCenter) > HANDLE_RADIUS);
+                    }
+
                     // Forward nit-hunt events to imgEl so the tooltip works with SDR slider active
-                    const onSliderMouseEnter = (e) => { if (globalDetailsEnabled) imgEl.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false, clientX: e.clientX, clientY: e.clientY })); };
-                    const onSliderMouseLeave = (e) => { imgEl.dispatchEvent(new MouseEvent('mouseleave', { bubbles: false })); };
-                    const onSliderMouseMove  = (e) => { if (globalDetailsEnabled) imgEl.dispatchEvent(new MouseEvent('mousemove', { bubbles: false, clientX: e.clientX, clientY: e.clientY })); };
+                    const onSliderMouseEnter = (e) => { _updateSliderCursor(e.clientX); if (globalDetailsEnabled) imgEl.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false, clientX: e.clientX, clientY: e.clientY })); };
+                    const onSliderMouseLeave = (e) => { slider.classList.remove('cursor-nit-hunt'); imgEl.dispatchEvent(new MouseEvent('mouseleave', { bubbles: false })); };
+                    const onSliderMouseMove  = (e) => { _updateSliderCursor(e.clientX); if (globalDetailsEnabled) imgEl.dispatchEvent(new MouseEvent('mousemove', { bubbles: false, clientX: e.clientX, clientY: e.clientY })); };
                     slider.addEventListener('mouseenter', onSliderMouseEnter);
                     slider.addEventListener('mouseleave', onSliderMouseLeave);
                     slider.addEventListener('mousemove',  onSliderMouseMove);
@@ -2715,7 +2858,7 @@ function openLightbox(batchItems, startIndex) {
             _setLightboxTitle(activeItem.gameName);
             const _compareAdditionalInfo = activeItem.additionalInfo || '';
             imageHeaderSubtitle.textContent = _compareAdditionalInfo;
-            imageHeaderSubtitle.style.display = _compareAdditionalInfo ? '' : 'none';
+            imageHeaderSubtitle.style.display = 'none';
 
             if (globalDetailsEnabled) {
                 lbPixelBuffer = null;
