@@ -1843,6 +1843,17 @@ async function decodePixelBuffer(blob) {
         }
     }
 
+    // No cICP chunk found. 16-bit PNGs in this app are always PQ (SDR PNGs are
+    // always written as 8-bit — see detectSdrFiles), so a missing chunk means the
+    // tag was lost somewhere upstream (re-save, edit, export from another tool),
+    // not that the image is actually SDR. Defaulting to the sRGB canvas fallback
+    // here would decode PQ code values with the wrong (sRGB gamma) EOTF and crush
+    // the image, so assume PQ instead and warn.
+    if (transferCharacteristic === null) {
+        console.warn('[decodePixelBuffer] 16-bit PNG has no cICP chunk — assuming PQ transfer (transfer=16). If this PNG is genuinely SDR, tag it explicitly.');
+        transferCharacteristic = 16;
+    }
+
     // Collect and decompress IDAT
     const idatChunks = [];
     offset = 8;

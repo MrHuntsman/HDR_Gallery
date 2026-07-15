@@ -2698,6 +2698,12 @@ function openLightbox(batchItems, startIndex) {
                 slider.appendChild(leftLabel);
                 slider.appendChild(rightLabel);
 
+                // Hoisted so both positionSlider() and activateSlider()'s updateSlider()
+                // can share them — positionSlider() needs these to re-derive the
+                // compare-mode label offsets from the divider without blanking them.
+                const HANDLE_RADIUS = 22; // ~ the 40px handle circle plus a little slack
+                const LABEL_GAP = 12;
+
                 // Position slider to exactly cover imgEl's rendered rect
                 function positionSlider() {
                     if (imgEl.classList.contains('lightbox-image-zooming')) {
@@ -2721,19 +2727,34 @@ function openLightbox(batchItems, startIndex) {
                         rightLabel.style.left  = '';
                         rightLabel.style.top   = (imgTop  + 10) + 'px';
                     } else {
-                        // Reset labels to default CSS positioning
-                        leftLabel.style.left  = '';
-                        leftLabel.style.right = '';
-                        leftLabel.style.top   = '';
-                        rightLabel.style.right = '';
-                        rightLabel.style.left  = '';
-                        rightLabel.style.top   = '';
                         const rect = imgEl.getBoundingClientRect();
                         const containerRect = imgContainer.getBoundingClientRect();
                         slider.style.left   = (rect.left - containerRect.left) + 'px';
                         slider.style.top    = (rect.top  - containerRect.top)  + 'px';
                         slider.style.width  = rect.width  + 'px';
                         slider.style.height = rect.height + 'px';
+
+                        if (otherImage) {
+                            // Compare-mode labels ride the divider — re-derive their
+                            // offset from its current position instead of clearing to
+                            // the (fixed-corner) CSS defaults, which don't apply here.
+                            const pct = (parseFloat(divider.style.left) || 50) / 100;
+                            const dividerX = pct * rect.width;
+                            leftLabel.style.left   = `${dividerX - HANDLE_RADIUS - LABEL_GAP}px`;
+                            leftLabel.style.right  = '';
+                            leftLabel.style.top    = '';
+                            rightLabel.style.left  = `${dividerX + HANDLE_RADIUS + LABEL_GAP}px`;
+                            rightLabel.style.right = '';
+                            rightLabel.style.top   = '';
+                        } else {
+                            // Reset labels to default CSS positioning
+                            leftLabel.style.left  = '';
+                            leftLabel.style.right = '';
+                            leftLabel.style.top   = '';
+                            rightLabel.style.right = '';
+                            rightLabel.style.left  = '';
+                            rightLabel.style.top   = '';
+                        }
                     }
                 }
 
@@ -2750,8 +2771,6 @@ function openLightbox(batchItems, startIndex) {
 
                     let isDragging = false;
                     const LABEL_WIDTH = 70;
-                    const HANDLE_RADIUS = 22; // ~ the 40px handle circle plus a little slack
-                    const LABEL_GAP = 12;
 
                     function updateSlider(clientX) {
                         const rect = slider.getBoundingClientRect();
@@ -2763,7 +2782,9 @@ function openLightbox(batchItems, startIndex) {
                             // Compare-lightbox labels ride alongside the drag handle,
                             // vertically centered, rather than sitting in fixed corners.
                             leftLabel.style.left = `${dividerX - HANDLE_RADIUS - LABEL_GAP}px`;
+                            leftLabel.style.right = '';
                             rightLabel.style.left = `${dividerX + HANDLE_RADIUS + LABEL_GAP}px`;
+                            rightLabel.style.right = '';
                         } else {
                             leftLabel.style.opacity = dividerX < LABEL_WIDTH ? '0' : '1';
                             rightLabel.style.opacity = dividerX > rect.width - LABEL_WIDTH ? '0' : '1';
