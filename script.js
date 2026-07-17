@@ -319,16 +319,22 @@ dropZone.addEventListener('click', () => {
 
 // ─── Details Overlay (global nit-hunt + metadata panels) ─────────────────────
 
+// Toggles the app-wide "Analysis Tool" (nit-hunt) mode, flipping the shared
+// globalDetailsEnabled flag and updating every Analysis Tool button across
+// the UI — not just in the lightbox. When enabling: if the lightbox is open,
+// starts decoding pixel buffers for the currently visible image(s) (handling
+// SDR-toggle mode, plain HDR mode, and dual-image compare mode separately)
+// and shows the metadata/nit-tooltip overlay. When disabling: removes the
+// nit-hunt cursor and hides all overlays. No-ops if a compare slider is
+// active and details aren't already on, since the two are mutually exclusive
+// there (see the hasActiveCompareSlider guard).
 function toggleGlobalDetailsMode() {
     const hasActiveCompareSlider = !!document.querySelector('#lightbox-overlay .inline-comparison-slider');
-    console.log(`[imo] toggleGlobalDetailsMode called, currentlyEnabled=${globalDetailsEnabled}, hasActiveCompareSlider=${hasActiveCompareSlider}, hasCompareTarget=${!!_compareTargetItem}, lightboxOpen=${lightboxOpen}`);
-    if (hasActiveCompareSlider && !globalDetailsEnabled && !_compareTargetItem) {
-        console.log('[imo] toggle blocked: active compare slider with no compare target');
+    if (hasActiveCompareSlider && !globalDetailsEnabled && !lightboxState.compareTargetItem) {
         return;
     }
 
     globalDetailsEnabled = !globalDetailsEnabled;
-    console.log(`[imo] globalDetailsEnabled now ${globalDetailsEnabled}`);
     
     // Update all detail buttons (in lightbox toolbar)
     updateAllDetailButtons(globalDetailsEnabled);
@@ -336,15 +342,14 @@ function toggleGlobalDetailsMode() {
     if (globalDetailsEnabled) {
         // If the lightbox is open, enable analysis without dismissing the compare slider.
         // The compare view can stay active while the IMO panel is overlaid on the image.
-        if (lightboxOpen) {
+        if (lightboxState.open) {
             const imgEl = document.querySelector('.lightbox-image');
             if (imgEl) imgEl.classList.add('cursor-nit-hunt');
             const container = document.querySelector('.lightbox-image-container');
             if (container) container.classList.add('cursor-nit-hunt');
-            const currentItem = lightboxBatch[lightboxIndex];
-            console.log(`[imo] enabling analysis, currentItem=${currentItem?.id}, lightboxSdrToggleActive=${lightboxSdrToggleActive}`);
+            const currentItem = lightboxState.batch[lightboxState.index];
             if (currentItem) {
-                if (lightboxSdrToggleActive) {
+                if (lightboxState.sdrToggleActive) {
                     // In SDR toggle mode — decode SDR buffer and show SDR metadata panel
                     _startSdrPixelDecode(currentItem);
                     if (currentVisibleImage) {
@@ -355,8 +360,8 @@ function toggleGlobalDetailsMode() {
                             _showSdrMetadataOverlay(currentItem, imageData.wrapper);
                         }
                     }
-                    lightboxSdrPixelBuffers.get(currentItem.id)?.then(buf => {
-                        if (lightboxSdrToggleActive && globalDetailsEnabled) {
+                    lightboxState.sdrPixelBuffers.get(currentItem.id)?.then(buf => {
+                        if (lightboxState.sdrToggleActive && globalDetailsEnabled) {
                             // find the lbPixelBuffer closure via imageWrappers isn't accessible here,
                             // so we dispatch a synthetic mouseenter to re-prime the tooltip
                             const imgElActive = document.querySelector('.lightbox-image');
@@ -367,13 +372,12 @@ function toggleGlobalDetailsMode() {
                     // Normal HDR mode, compare slider mode, or compare target swap mode.
                     const detailsTarget = _getVisibleLightboxItem() || currentItem;
                     currentVisibleImage = detailsTarget.id;
-                    console.log(`[imo] normal path, detailsTarget=${detailsTarget.id}, wrapperExists=${imageWrappers.has(detailsTarget.id)}`);
                     _startPixelDecode(detailsTarget);
-                    if (_compareTargetItem) {
+                    if (lightboxState.compareTargetItem) {
                         // Dual-image compare: decode both sides so the nit tooltip can
                         // switch buffers as the cursor crosses the slider divider.
                         _startPixelDecode(currentItem);
-                        _startPixelDecode(_compareTargetItem);
+                        _startPixelDecode(lightboxState.compareTargetItem);
                     }
                     showDetailsForImage(currentVisibleImage);
                     const imgElActive = document.querySelector('.lightbox-image');
@@ -385,7 +389,7 @@ function toggleGlobalDetailsMode() {
         }
     } else {
         // Remove nit-hunt cursor from lightbox image
-        if (lightboxOpen) {
+        if (lightboxState.open) {
             const imgEl = document.querySelector('.lightbox-image');
             if (imgEl) imgEl.classList.remove('cursor-nit-hunt');
             const container = document.querySelector('.lightbox-image-container');
@@ -395,7 +399,7 @@ function toggleGlobalDetailsMode() {
         hideAllDetailsOverlays();
         nitTooltip.style.display = 'none';
         // If currently zoomed, start the idle-hide timer now that analysis mode is off
-        if (lightboxOpen && _lightboxResetZoomIdleTimer) _lightboxResetZoomIdleTimer();
+        if (lightboxState.open && lightboxState.resetZoomIdleTimer) lightboxState.resetZoomIdleTimer();
     }
 }
 
@@ -404,7 +408,7 @@ function updateAllDetailButtons(isActive) {
 
     document.querySelectorAll('.detail-button').forEach(button => {
         button.classList.toggle('button-active', isActive);
-        button.classList.toggle('detail-button--blocked', hasActiveCompareSlider && !isActive && !_compareTargetItem);
+        button.classList.toggle('detail-button--blocked', hasActiveCompareSlider && !isActive && !lightboxState.compareTargetItem);
 
         if (isActive) {
             button.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg><span class="btn-label"> <u>A</u>nalysis Tool</span>';
@@ -415,12 +419,11 @@ function updateAllDetailButtons(isActive) {
 }
 
 function _getVisibleLightboxItem() {
-    const baseItem = lightboxBatch[lightboxIndex];
-    return (_compareTargetItem && lightboxCompareImageActive) ? _compareTargetItem : baseItem;
+    const baseItem = lightboxState.batch[lightboxState.index];
+    return (lightboxState.compareTargetItem && lightboxState.compareImageActive) ? lightboxState.compareTargetItem : baseItem;
 }
 
 async function showDetailsForImage(imageId, retries = 10) {
-    console.log(`[imo] showDetailsForImage called, imageId=${imageId}, retries=${retries}, wrapperFound=${imageWrappers.has(imageId)}, imageWrappersSize=${imageWrappers.size}`);
     let imageData = imageWrappers.get(imageId);
     if (!imageData && retries > 0) {
         await new Promise(r => requestAnimationFrame(r));
@@ -433,23 +436,18 @@ async function showDetailsForImage(imageId, retries = 10) {
 
     const { wrapper, imageItem } = imageData;
     let { metadata } = imageData;
-    console.log(`[imo] wrapper resolved for imageId=${imageId}, wrapperInDom=${document.body.contains(wrapper)}, hasCachedMetadata=${!!metadata}`);
 
     // If metadata is not yet loaded, fetch it
     if (!metadata) {
-        console.log(`[imo] no cached metadata, calling getImageFile(${imageItem.id})`);
         const freshImageItem = await getImageFile(imageItem.id);
         
         metadata = freshImageItem?.metadata;
-        console.log(`[imo] getImageFile resolved, metadataFromDb=${!!metadata}`);
         
         // If still no metadata, extract it
         if (!metadata) {
-            console.log(`[imo] no metadata in db, fetching blob from ${imageItem.hdrUrl}`);
             const resp = await fetch(imageItem.hdrUrl);
             const blob = await resp.blob();
             metadata = await getImageMetadata(blob, imageItem.name);
-            console.log(`[imo] extracted metadata from blob, success=${!!metadata}`);
             
             // Save the extracted metadata to the database
             if (metadata && imageItem.id) {
@@ -479,7 +477,6 @@ async function showDetailsForImage(imageId, retries = 10) {
     }
     
     if (metadata) {
-        console.log(`[imo] metadata ready for imageId=${imageId}, calling showMetadataOverlay`);
         // Remove any existing overlay first
         const existing = wrapper.querySelector('.image-meta-overlay');
         if (existing) existing.remove();
@@ -535,8 +532,15 @@ async function computeSdrLuminanceStats(sdrBlob) {
 
 
 
+// Handles a batch file upload end-to-end: filters out unsupported formats,
+// rejects/warns on SDR-looking files (only HDR is supported), shows the
+// import modal for HDR type/game name/spoiler input, then for each file
+// converts to AVIF, extracts metadata, tonemaps an SDR preview, computes
+// luminance stats, and saves via addImageFile — before refreshing the
+// gallery. Progress UI (setProgressStep/_renderProgress) is updated at each
+// stage; a failure on one file logs and continues to the next rather than
+// aborting the whole batch.
 async function processFiles(selectedFiles) {
-    console.log("[processFiles] v2 running, files:", selectedFiles.map(f => f.name));
     let allowedFiles = selectedFiles.filter(isAllowedFile);
     const rejectedFiles = selectedFiles.filter(file => !isAllowedFile(file));
 
@@ -580,7 +584,6 @@ async function processFiles(selectedFiles) {
     const _importT0 = performance.now();
     function _importLog(label, startMs) {
         const elapsed = (performance.now() - startMs).toFixed(0);
-        console.log(`[import] ${label}: ${elapsed} ms`);
     }
 
     try {
@@ -602,9 +605,6 @@ async function processFiles(selectedFiles) {
                     const _t = performance.now();
                     const result = await convertToAVIF(file);
                     _importLog(`convertToAVIF: ${file.name}`, _t);
-                    console.log('[convertToAVIF processFiles] hdrFile:', result.hdrFile?.name, result.hdrFile?.size);
-                    console.log('[convertToAVIF processFiles] sdrBlob:', result.sdrBlob?.constructor?.name, result.sdrBlob?.size);
-                    console.log('[convertToAVIF processFiles] thumbBlob:', result.thumbBlob?.constructor?.name, result.thumbBlob?.size);
                     hdrFile = result.hdrFile;
                     prebuiltSdr = result.sdrBlob;
                     prebuiltThumb = result.thumbBlob;
@@ -631,12 +631,10 @@ async function processFiles(selectedFiles) {
                 try {
                     sdrBlob = await convertToSDR(hdrFile, hdrFile.name);
                     _importLog(`convertToSDR: ${hdrFile.name}`, _t);
-                    console.log('[processFiles] convertToSDR done:', sdrBlob?.size);
                 } catch (error) {
                     console.error('SDR conversion failed:', error);
                 }
             } else {
-                console.log('[processFiles] skipping convertToSDR, using prebuilt:', prebuiltSdr?.size);
             }
 
             const thumbBlob = prebuiltThumb;
@@ -653,7 +651,6 @@ async function processFiles(selectedFiles) {
             _progressFileLabel = `Saving: ${hdrFile.name}`;
             _renderProgress();
             const _tSave = performance.now();
-            console.log('[processFiles] storing — thumb:', thumbBlob?.size, 'sdr:', sdrBlob?.size);
             await addImageFile(hdrFile, metadata, sdrBlob, hdrType, batchId, thumbBlob, importGameName, importSpoiler, importAdditionalInfo, sdrLuminanceStats, importHidden);
             _importLog(`addImageFile: ${hdrFile.name}`, _tSave);
         }
@@ -902,13 +899,12 @@ function createCollageCard(batchItems, isGameGrouped = false, viewMode = 'list')
             if (_decodePromises.has(item.hdrUrl)) return; // already started
             // Use a DOM-connected pool slot if the lightbox is open, otherwise a detached Image.
             // Pool slots are kept in the document so their bitmaps won't be evicted.
-            const img = _lbDecodePool ? _poolPrefetch(item.hdrUrl) : (() => {
+            const img = lightboxState.decodePool ? _poolPrefetch(item.hdrUrl) : (() => {
                 const i = new Image(); i.src = item.hdrUrl; return i;
             })();
             if (!img) return;
             const _pt = performance.now();
             const p = img.decode().then(() => {
-                console.log(`[lightbox] hover prefetch decode complete for "${item.name}"  +${(performance.now()-_pt).toFixed(1)}ms`);
             }).catch(() => {});
             _decodePromises.set(item.hdrUrl, p);
         });
@@ -936,263 +932,220 @@ function createCollageCard(batchItems, isGameGrouped = false, viewMode = 'list')
 
 // ─── Lightbox ─────────────────────────────────────────────────────────────────
 
-let lightboxOpen = false;
-let lightboxBatch = [];
-let lightboxIndex = 0;
-// _lbOpenTime is set by openLightbox and read by _startPixelDecode for timing logs
-let _lbOpenTime = 0;
-let lightboxPixelBuffers = new Map(); // imageId → buffer promise (HDR)
-let lightboxSdrPixelBuffers = new Map(); // imageId → buffer promise (SDR)
-// Sync-readable caches mirroring the two maps above (populated once each promise
-// resolves). Needed so the compare-slider nit tooltip can pick the correct
-// buffer per mousemove event without awaiting a promise every frame.
-let lightboxPixelBufferValues = new Map();
-let lightboxSdrPixelBufferValues = new Map();
-let lightboxSdrActive = false;
-let lightboxSdrToggleActive = false; // full SDR view (no slider)
-let lightboxCompareImageActive = false; // toggles full compare image display when ?compare= is active
-let lightboxBlobUrls = new Map(); // imageId → { url, fullUrl, blob, sdrUrl }
-// Hook exposed by openLightbox so toggleGlobalDetailsMode can trigger the idle timer
-let _lightboxResetZoomIdleTimer = null;
-let _lightboxHdrInfoBar = null;
-let _lightboxHdrInfoBarMq = null;
+const lightboxState = {
+    open: false,
+    batch: [],
+    index: 0,
+    openTime: 0, // set by openLightbox, read by _startPixelDecode for timing logs
+
+    pixelBuffers: new Map(),    // imageId → buffer promise (HDR)
+    sdrPixelBuffers: new Map(), // imageId → buffer promise (SDR)
+    // Sync-readable caches mirroring the two maps above (populated once each
+    // promise resolves). Needed so the compare-slider nit tooltip can pick the
+    // correct buffer per mousemove event without awaiting a promise every frame.
+    pixelBufferValues: new Map(),
+    sdrPixelBufferValues: new Map(),
+
+    sdrActive: false,
+    sdrToggleActive: false,     // full SDR view (no slider)
+    compareImageActive: false,  // toggles full compare image display when ?compare= is active
+    blobUrls: new Map(),        // imageId → { url, fullUrl, blob, sdrUrl }
+
+    // Hook so toggleGlobalDetailsMode can trigger the idle timer
+    resetZoomIdleTimer: null,
+    hdrInfoBar: null,
+    hdrInfoBarMq: null,
+
+    // DOM-connected decode pool — keeps decoded bitmaps alive in the browser's
+    // live image cache so they can't be evicted before navigation. Detached
+    // Image objects are evicted under memory pressure; elements that are
+    // actually in the document are treated as "in use" and kept warm. Sized
+    // to the full batch so decoded images are never evicted mid-session.
+    decodePool: null,     // <div> appended to <body> while lightbox is open
+    poolSlots: new Map(), // url → dedicated <img> element for that image
+
+    // When set, the lightbox's SDR-slider button compares against this image
+    // instead of the current item's own SDR render. Cleared on lightbox close.
+    compareTargetItem: null,
+
+    render: null,                 // set by openLightbox, called by navigateLightbox
+    arrowThrottleLast: -Infinity, // timestamp of last throttled arrow render
+    arrowThrottleTimer: null,     // trailing-edge timer handle
+};
 
 function _updateLightboxHdrInfoBar() {
-    if (!_lightboxHdrInfoBar || !_lightboxHdrInfoBarMq) return;
-    const isHdrSignalDetected = _lightboxHdrInfoBarMq.matches;
-    _lightboxHdrInfoBar.style.display = isHdrSignalDetected ? 'none' : 'flex';
+    if (!lightboxState.hdrInfoBar || !lightboxState.hdrInfoBarMq) return;
+    const isHdrSignalDetected = lightboxState.hdrInfoBarMq.matches;
+    lightboxState.hdrInfoBar.style.display = isHdrSignalDetected ? 'none' : 'flex';
 }
 
-// Shared decode promise cache — keyed by hdrUrl so hover prefetch and lightbox
-// can share the same in-flight promise rather than racing each other.
-const _decodePromises = new Map(); // hdrUrl → Promise<void>
-
-// DOM-connected decode pool — keeps decoded bitmaps alive in the browser's live
-// image cache so they can't be evicted before navigation.
-// Detached Image objects are evicted under memory pressure; elements that are
-// actually in the document are treated as "in use" and kept warm.
-// The pool is sized to the full batch so decoded images are never evicted mid-session.
-let _lbDecodePool = null;       // <div> appended to <body> while lightbox is open
-let _lbPoolSlots  = new Map();  // url → dedicated <img> element for that image
-const _prefetchedImages = new Map(); // url → pool <img> slot (dedup guard, mirrors _lbPoolSlots)
-
-// Lazily start pixel decode for a single item on demand.
-// Called when the analysis tool is enabled or when navigating while it's on.
-function _startPixelDecode(item) {
-    if (lightboxPixelBuffers.has(item.id)) return;
-    const entry = lightboxBlobUrls.get(item.id);
-    if (!entry) return;
-    const _t0 = _lbOpenTime || performance.now();
-    const p = new Promise(resolve => {
-        console.log(`[lightbox] pixel worker: creating Worker  +${(performance.now()-_t0).toFixed(1)}ms`);
-        const worker = new Worker('./pixel-worker.js', { type: 'module' });
-        console.log(`[lightbox] pixel worker: starting fetch  +${(performance.now()-_t0).toFixed(1)}ms`);
-        fetch(entry.fullUrl)
-            .then(r => {
-                console.log(`[lightbox] pixel worker: fetch headers received  +${(performance.now()-_t0).toFixed(1)}ms`);
-                return r.arrayBuffer();
-            })
-            .then(ab => {
-                console.log(`[lightbox] pixel worker: arrayBuffer ready (${(ab.byteLength/1024).toFixed(0)} KB), posting to worker  +${(performance.now()-_t0).toFixed(1)}ms`);
-                worker.postMessage({ arrayBuffer: ab }, [ab]);
-            });
-        worker.onmessage = e => {
-            console.log(`[lightbox] pixel worker: worker message received (${e.data.error ? 'error' : 'ok'})  +${(performance.now()-_t0).toFixed(1)}ms`);
-            worker.terminate();
-            resolve(e.data.error ? null : e.data);
-        };
-        worker.onerror = (err) => {
-            console.warn(`[lightbox] pixel worker: worker error  +${(performance.now()-_t0).toFixed(1)}ms`, err);
-            worker.terminate();
-            resolve(null);
-        };
-    });
-    lightboxPixelBuffers.set(item.id, p);
-    p.then(buf => { if (buf) lightboxPixelBufferValues.set(item.id, buf); });
-}
-
-// Lazily start pixel decode for the SDR version of an item.
-// The SDR file is 8-bit sRGB AVIF — decoded the same way by pixel-worker,
-// but we store it separately so HDR and SDR buffers can coexist.
-function _startSdrPixelDecode(item) {
-    if (lightboxSdrPixelBuffers.has(item.id)) return;
-    const entry = lightboxBlobUrls.get(item.id);
-    if (!entry?.sdrUrl) return;
-    const _t0 = _lbOpenTime || performance.now();
-    const p = new Promise(resolve => {
-        const worker = new Worker('./pixel-worker.js', { type: 'module' });
-        fetch(entry.sdrUrl)
-            .then(r => r.arrayBuffer())
-            .then(ab => worker.postMessage({ arrayBuffer: ab }, [ab]));
-        worker.onmessage = e => {
-            worker.terminate();
-            resolve(e.data.error ? null : e.data);
-        };
-        worker.onerror = () => { worker.terminate(); resolve(null); };
-    });
-    lightboxSdrPixelBuffers.set(item.id, p);
-    p.then(buf => { if (buf) lightboxSdrPixelBufferValues.set(item.id, buf); });
-}
-
-// sRGB EOTF: gamma-encoded [0,1] → linear, then scale to cd/m²
-// SDR reference white = 203 cd/m² (IEC 61966-2-1 / HLG mapping)
-function _srgbEotf(v) {
-    const c = Math.max(0, Math.min(1, v));
-    return (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)) * 203;
-}
-
-// Like getNitsAtPixel but treats the buffer as 8-bit sRGB (SDR tonemap output).
-// The pixel worker scales 8-bit values to 16-bit big-endian, so we divide by 65535.
-function _getNitsAtPixelSdr(pixelBuffer, imgX, imgY) {
-    const { pixels, width, height, samplesPerPixel } = pixelBuffer;
-    const px = Math.max(0, Math.min(width  - 1, Math.floor(imgX)));
-    const py = Math.max(0, Math.min(height - 1, Math.floor(imgY)));
-    const base = (py * width + px) * samplesPerPixel * 2;
-    const r = _srgbEotf((pixels[base]     << 8 | pixels[base + 1]) / 65535);
-    const g = _srgbEotf((pixels[base + 2] << 8 | pixels[base + 3]) / 65535);
-    const b = _srgbEotf((pixels[base + 4] << 8 | pixels[base + 5]) / 65535);
-    return {
-        rNits: r, gNits: g, bNits: b,
-        luminance: 0.2126 * r + 0.7152 * g + 0.0722 * b,
-        gamut: 'SDR',
-    };
-}
-
-// Assign a dedicated pool slot for a URL (one slot per URL, no eviction).
-// Returns the pool <img> element so callers can call .decode() on it.
-function _poolPrefetch(url) {
-    if (_lbPoolSlots.has(url)) return _lbPoolSlots.get(url); // already has a slot
-    if (!_lbDecodePool) return null; // pool not open yet
-    const img = document.createElement('img');
-    img.src = url;
-    _lbDecodePool.appendChild(img);
-    _lbPoolSlots.set(url, img);
-    _prefetchedImages.set(url, img); // keep _prefetchedImages in sync for legacy references
-    return img;
-}
-
-// ─── Compare Mode ────────────────────────────────────────────────────────────
-// When set, the lightbox's SDR-slider button compares against this image
-// instead of the current item's own SDR render. Cleared on lightbox close.
-let _compareTargetItem = null;
-
-// Opens the normal lightbox for item1, with item2 wired in as the slider's
-// overlay target (via the existing SDR Slider button) instead of item1's SDR.
-async function openCompareLightbox(id1, id2) {
-    let item1, item2;
-    try {
-        [item1, item2] = await Promise.all([getImageFile(id1), getImageFile(id2)]);
-    } catch (err) {
-        console.error('[compare] failed to load images:', err);
-        showStatusMessage('Compare: failed to load one or both images', 'error');
-        return;
+// Builds the "No HDR signal detected" info bar (with browser-compatibility
+// tooltips on hover) and appends it to the lightbox overlay. Wires up the
+// dynamic-range media query listener that keeps it in sync as the display's
+// HDR signal changes.
+function _setupHdrInfoBar(overlay) {
+    lightboxState.hdrInfoBar = document.createElement('div');
+    lightboxState.hdrInfoBar.className = 'hdr-info-bar hdr-info-bar-sdr lightbox-hdr-info-bar';
+    lightboxState.hdrInfoBar.style.display = 'none';
+    lightboxState.hdrInfoBar.innerHTML = `
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        <span><span class="sdr-browser-tip"><strong>No HDR signal detected</strong><span class="sdr-browser-tooltip"><strong>Browser HDR compatibility</strong><span class="sdr-browser-row"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#1bc174" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> Chromium-based: Chrome, Edge…</span><span class="sdr-browser-row"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#f87171" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg> Firefox</span></span></span> — Enable HDR on Windows and use a <span class="sdr-browser-tip"><strong>compatible browser</strong><span class="sdr-browser-tooltip"><strong>Browser HDR compatibility</strong><span class="sdr-browser-row"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#1bc174" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> Chromium-based: Chrome, Edge…</span><span class="sdr-browser-row"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#f87171" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg> Firefox</span></span></span>.</span>`;
+    overlay.appendChild(lightboxState.hdrInfoBar);
+    lightboxState.hdrInfoBarMq = window.matchMedia('(dynamic-range: high)');
+    if (typeof lightboxState.hdrInfoBarMq.addEventListener === 'function') {
+        lightboxState.hdrInfoBarMq.addEventListener('change', _updateLightboxHdrInfoBar);
+    } else if (typeof lightboxState.hdrInfoBarMq.addListener === 'function') {
+        lightboxState.hdrInfoBarMq.addListener(_updateLightboxHdrInfoBar);
     }
-    if (!item1 || !item2) {
-        showStatusMessage('Compare: one or both image IDs were not found', 'error');
-        return;
-    }
-    _compareTargetItem = item2;
-    openLightbox([item1], 0);
-    if (lightboxBlobUrls) {
-        lightboxBlobUrls.set(item2.id, {
-            url: item2.thumbUrl || item2.hdrUrl,
-            fullUrl: item2.hdrUrl,
-            blob: null,
-            sdrUrl: item2.sdrUrl || null,
+    _updateLightboxHdrInfoBar();
+
+    lightboxState.hdrInfoBar.querySelectorAll('.sdr-browser-tip').forEach(_sdrTip => {
+        const _sdrTipBox = _sdrTip.querySelector('.sdr-browser-tooltip');
+        if (!_sdrTipBox) return;
+        _sdrTip.addEventListener('mouseenter', () => {
+            _sdrTipBox.style.visibility = 'hidden';
+            _sdrTipBox.style.display = 'flex';
+            _sdrTipBox.style.top = '0';
+            _sdrTipBox.style.left = '0';
+            const r = _sdrTip.getBoundingClientRect();
+            const tipW = _sdrTipBox.offsetWidth;
+            let left = r.left + r.width / 2 - tipW / 2;
+            left = Math.max(8, Math.min(left, window.innerWidth - tipW - 8));
+            _sdrTipBox.style.top = (r.bottom + 8) + 'px';
+            _sdrTipBox.style.left = left + 'px';
+            _sdrTipBox.style.visibility = 'visible';
         });
+        _sdrTip.addEventListener('mouseleave', () => {
+            _sdrTipBox.style.display = 'none';
+        });
+    });
+}
+
+// Creates the lightbox filmstrip strip element, appends it to the overlay,
+// and wires up smooth (lerp-animated) horizontal scrolling on mousewheel.
+// Returns the filmstrip element — callers keep populating/reading it via
+// rebuildFilmstrip() and other logic that lives in openLightbox.
+function _setupFilmstrip(overlay) {
+    const filmstrip = document.createElement('div');
+    filmstrip.className = 'lightbox-filmstrip';
+    overlay.appendChild(filmstrip);
+
+    // ── Filmstrip mousewheel horizontal scroll (smooth) ──
+    let _fsTarget = 0;
+    let _fsRaf = null;
+
+    function _fsAnimateLerp() {
+        const diff = _fsTarget - filmstrip.scrollLeft;
+        if (Math.abs(diff) < 0.5) {
+            filmstrip.scrollLeft = _fsTarget;
+            _fsRaf = null;
+            return;
+        }
+        filmstrip.scrollLeft += diff * 0.18;
+        _fsRaf = requestAnimationFrame(_fsAnimateLerp);
     }
-    // Auto-open the slider once the toolbar exists (renderLightboxImage runs async).
-    const _tryClick = () => {
-        const btn = document.querySelector('.js-compare-slider-btn');
-        if (btn) btn.click();
-        else if (lightboxOpen) setTimeout(_tryClick, 50);
+
+    filmstrip.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        const delta = e.deltaY !== 0 ? e.deltaY : e.deltaX;
+        const maxScroll = filmstrip.scrollWidth - filmstrip.clientWidth;
+        _fsTarget = Math.max(0, Math.min(maxScroll, _fsTarget + delta));
+        if (!_fsRaf) _fsRaf = requestAnimationFrame(_fsAnimateLerp);
+    }, { passive: false });
+
+    return filmstrip;
+}
+
+// Returns the compare-slider button's icon+label HTML, which differs depending
+// on whether a compare target is active ("Compare") or not ("SDR Slider").
+function _compareBtnIconHTML() {
+    return lightboxState.compareTargetItem
+        ? '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12H3"/><path d="m7 8-4 4 4 4"/><path d="m17 8 4 4-4 4"/></svg><span class="btn-label"> Compare</span>'
+        : '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12H3"/><path d="m7 8-4 4 4 4"/><path d="m17 8 4 4-4 4"/></svg><span class="btn-label"> <u>S</u>DR Slider</span>';
+}
+
+// Builds the lightbox toolbar buttons: Analysis Tool + separator + Compare/SDR
+// Slider + SDR/HDR toggle pill + separator on the left; Edit + separator +
+// Delete on the right (inserted before the already-created Copy Link button).
+// Only the Analysis Tool button's click behavior is self-contained enough to
+// wire up here — Compare/SDR Slider, SDR toggle, Edit, and Delete get their
+// real onclick handlers wired up later in openLightbox, where they interact
+// with the zoom/compare-slider state. Returns the created button elements.
+function _setupToolbarButtons(toolbarLeft, toolbarRight, copyLinkBtn) {
+    const detailsBtn = document.createElement('button');
+    detailsBtn.className = 'button-secondary detail-button' + (globalDetailsEnabled ? ' button-active' : '');
+    detailsBtn.innerHTML = globalDetailsEnabled
+        ? '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg><span class="btn-label"> <u>A</u>nalysis Tool</span>'
+        : '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" opacity="0.3"></path><circle cx="12" cy="12" r="3"></circle></svg><span class="btn-label"> <u>A</u>nalysis Tool</span>';
+    detailsBtn.title = 'Analysis Tool (A)';
+    detailsBtn.dataset.tooltip = 'Analysis Tool (A)';
+    detailsBtn.onclick = () => {
+        const hasActiveCompareSlider = !!document.querySelector('#lightbox-overlay .inline-comparison-slider');
+        if (hasActiveCompareSlider && !globalDetailsEnabled && !lightboxState.compareTargetItem) return;
+        toggleGlobalDetailsMode();
     };
-    setTimeout(_tryClick, 50);
-}
+    toolbarLeft.appendChild(detailsBtn);
 
-// If the URL has ?compare=id1,id2, open the comparison lightbox — called after
-// refreshGallery() finishes (see DOMContentLoaded below), NOT at parse time.
-// Reason: opening it too early raced against buildGalleryCards()'s
-// imageWrappers.clear(), which could wipe the freshly-registered lightbox
-// wrapper entry before the Analysis Tool panel could read it (imo panel
-// silently never appearing, Chrome/Edge only — timing-dependent).
-function _checkCompareUrl() {
-    const ids = (new URLSearchParams(window.location.search).get('compare') || '')
-        .split(',').map(s => s.trim()).filter(Boolean);
-    if (ids.length === 2) openCompareLightbox(ids[0], ids[1]);
-}
+    const sep0 = document.createElement('div');
+    sep0.className = 'toolbar-separator';
+    toolbarLeft.appendChild(sep0);
 
-function openLightbox(batchItems, startIndex) {
-    if (lightboxOpen) closeLightbox();
+    const compareBtn = document.createElement('button');
+    compareBtn.className = 'button-secondary js-compare-slider-btn';
+    compareBtn.title = lightboxState.compareTargetItem ? 'Compare Slider (S)' : 'SDR Slider (S)';
+    compareBtn.dataset.tooltip = compareBtn.title;
+    compareBtn.innerHTML = lightboxState.compareTargetItem
+        ? '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12H3"/><path d="m7 8-4 4 4 4"/><path d="m17 8 4 4-4 4"/></svg><span class="btn-label"> Compare</span>'
+        : '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12H3"/><path d="m7 8-4 4 4 4"/><path d="m17 8 4 4-4 4"/></svg><span class="btn-label"> <u>S</u>DR Slider</span>';
+    toolbarLeft.appendChild(compareBtn);
 
-    const _lbT0 = performance.now();
-    _lbOpenTime = _lbT0;
-    console.log(`[lightbox] openLightbox() called  +0ms`);
-
-    lightboxOpen = true;
-    lightboxBatch = batchItems;
-    lightboxIndex = startIndex;
-    lightboxSdrActive = false;
-    lightboxCompareImageActive = false;
-
-    // Create a DOM-connected decode pool sized to the full batch.
-    // Each image that gets decoded gets its own permanent <img> slot so the browser
-    // can never evict its bitmap mid-session. Slots are added lazily by _poolPrefetch.
-    _lbDecodePool = document.createElement('div');
-    _lbDecodePool.style.cssText = 'position:fixed;width:1px;height:1px;overflow:hidden;opacity:0;pointer-events:none;z-index:-1;';
-    _lbPoolSlots.clear();
-    _prefetchedImages.clear();
-    document.body.appendChild(_lbDecodePool);
-
-    // Pre-create blob URLs for all images in the batch — reused on every navigation, no re-creation
-    lightboxBlobUrls = new Map();
-    lightboxBatch.forEach(item => {
-        // Use Cloudinary URLs directly — no blob URL creation needed
-        const fullUrl    = item.hdrUrl;
-        const displayUrl = item.thumbUrl || item.hdrUrl;
-        const sdrUrl     = item.sdrUrl   || null;
-        lightboxBlobUrls.set(item.id, { url: displayUrl, fullUrl, blob: null, sdrUrl });
-    });
-
-    // Prefetch SDR images for the opening item and its neighbours so that
-    // clicking the SDR slider / toggle shows the image instantly.
-    _sdrPreloadCache.clear();
-    _prefetchSdrImages(startIndex);
-
-    // Eagerly decode the entire batch into the DOM pool.    // At ~1MB per AVIF image this is cheap on the network; decoded bitmaps are held
-    // by their pool slots and never evicted mid-session.
-    // Priority: opened image first, then outward alternating, then the rest.
-    const _eagerOrder = [startIndex];
-    for (let d = 1; d < lightboxBatch.length; d++) {
-        if (startIndex + d < lightboxBatch.length) _eagerOrder.push(startIndex + d);
-        if (startIndex - d >= 0)                   _eagerOrder.push(startIndex - d);
+    const sdrToggleBtn = document.createElement('div');
+    sdrToggleBtn.className = 'sdr-pill-toggle';
+    if (lightboxState.compareTargetItem) {
+        sdrToggleBtn.title = 'Swap compared images (D)';
+        sdrToggleBtn.dataset.tooltip = 'Swap compared images (D)';
+        sdrToggleBtn.innerHTML = '<span class="sdr-pill-seg sdr-pill-seg--active" data-seg="image1">Image 1</span><span class="sdr-pill-seg" data-seg="image2">Image 2</span>';
+    } else {
+        sdrToggleBtn.title = 'SDR Toggle (D)';
+        sdrToggleBtn.dataset.tooltip = 'SDR Toggle (D)';
+        sdrToggleBtn.innerHTML = '<span class="sdr-pill-seg" data-seg="sdr">SDR</span><span class="sdr-pill-seg sdr-pill-seg--active" data-seg="hdr">HDR</span>';
     }
-    _eagerOrder.forEach((i, slot) => {
-        const entry = lightboxBlobUrls.get(lightboxBatch[i]?.id);
-        if (!entry?.fullUrl) return;
-        // Stagger by 60ms per slot — current image gets a head start, rest trickle in
-        // without saturating the codec thread or competing with the first paint.
-        setTimeout(() => {
-            const poolImg = _poolPrefetch(entry.fullUrl);
-            if (!poolImg || _decodePromises.has(entry.fullUrl)) return;
-            const _pt = performance.now();
-            const promise = poolImg.decode().then(() => {
-                console.log(`[lightbox] eager batch decode done: "${lightboxBatch[i].name}" (slot ${slot})  +${(performance.now()-_pt).toFixed(1)}ms`);
-            }).catch(() => {});
-            _decodePromises.set(entry.fullUrl, promise);
-        }, slot * 60);
-    });
+    toolbarLeft.appendChild(sdrToggleBtn);
 
-    // Build overlay
-    const overlay = document.createElement('div');
-    overlay.id = 'lightbox-overlay';
-    overlay.className = 'lightbox-overlay';
+    const sep1 = document.createElement('div');
+    sep1.className = 'toolbar-separator';
+    toolbarLeft.appendChild(sep1);
 
-    // Track whether mousedown started inside interactive content (IMO panel, SDR slider, etc.)
-    // so that a drag released outside doesn't fire a spurious close click.
+    // ── RIGHT side: Edit, Copy Link | separator | Delete, Delete All ──
+    const editBtn = document.createElement('button');
+    editBtn.className = 'button-secondary';
+    editBtn.title = 'Edit details';
+    editBtn.dataset.tooltip = 'Edit';
+    editBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg><span class="btn-label"> Edit</span>';
+    toolbarRight.insertBefore(editBtn, copyLinkBtn);
+
+    const sep2 = document.createElement('div');
+    sep2.className = 'toolbar-separator';
+    toolbarRight.appendChild(sep2);
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.className = 'button-danger';
+    deleteBtn.title = 'Delete image';
+    deleteBtn.dataset.tooltip = 'Delete';
+    deleteBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg><span class="btn-label"> Delete</span>';
+    toolbarRight.appendChild(deleteBtn);
+
+    return { detailsBtn, compareBtn, sdrToggleBtn, editBtn, deleteBtn, sep2 };
+}
+
+// Wires up click-outside-to-close behavior on the lightbox overlay: tracks
+// whether a mousedown started inside interactive content (IMO panel, SDR
+// slider, etc. — via the exposed overlay._setMousedownInsideContent setter,
+// used by child handlers that stopPropagation) so a drag released outside
+// doesn't fire a spurious close, then closes on genuine backdrop clicks
+// (including position-aware checks for the nav buttons and filmstrip).
+function _setupOverlayDismiss(overlay, imageArea, filmstrip, toolbar, toolbarInner, toolbarLeft, toolbarRight, prevBtn, nextBtn) {
     let _mousedownInsideContent = false;
-    // Expose a setter so child handlers that call stopPropagation (e.g. IMO panel drag)
-    // can still mark the flag — call overlay._setMousedownInsideContent(true) from there.
     overlay._setMousedownInsideContent = (val) => { _mousedownInsideContent = val; };
     overlay.addEventListener('mousedown', (e) => {
         // Consider any target that isn't the bare overlay/imageArea/filmstrip/toolbar as "inside content"
@@ -1234,28 +1187,164 @@ function openLightbox(batchItems, startIndex) {
 
         // Toolbar: clicking empty areas does nothing (only explicit close button closes)
     });
+}
 
-    // ── Main image area ──
-    const imageArea = document.createElement('div');
-    imageArea.className = 'lightbox-image-area';
-    overlay.appendChild(imageArea);
+// Shared decode promise cache — keyed by hdrUrl so hover prefetch and lightbox
+// can share the same in-flight promise rather than racing each other.
+const _decodePromises = new Map(); // hdrUrl → Promise<void>
 
-    // Image wrapper (hosts zoom + nit-hunt + comparison slider + metadata overlay)
-    const imageWrapper = document.createElement('div');
-    imageWrapper.className = 'lightbox-image-wrapper';
-    imageArea.appendChild(imageWrapper);
+const _prefetchedImages = new Map(); // url → pool <img> slot (dedup guard, mirrors lightboxState.poolSlots)
 
-    // ── Image header overlay (tags + title above image) ──
-    const imageHeader = document.createElement('div');
-    imageHeader.className = 'lightbox-image-header';
+// Lazily start pixel decode for a single item on demand.
+// Called when the analysis tool is enabled or when navigating while it's on.
+function _startPixelDecode(item) {
+    if (lightboxState.pixelBuffers.has(item.id)) return;
+    const entry = lightboxState.blobUrls.get(item.id);
+    if (!entry) return;
+    const _t0 = lightboxState.openTime || performance.now();
+    const p = new Promise(resolve => {
+        const worker = new Worker('./pixel-worker.js', { type: 'module' });
+        fetch(entry.fullUrl)
+            .then(r => {
+                return r.arrayBuffer();
+            })
+            .then(ab => {
+                worker.postMessage({ arrayBuffer: ab }, [ab]);
+            });
+        worker.onmessage = e => {
+            worker.terminate();
+            resolve(e.data.error ? null : e.data);
+        };
+        worker.onerror = (err) => {
+            console.warn(`[lightbox] pixel worker: worker error  +${(performance.now()-_t0).toFixed(1)}ms`, err);
+            worker.terminate();
+            resolve(null);
+        };
+    });
+    lightboxState.pixelBuffers.set(item.id, p);
+    p.then(buf => { if (buf) lightboxState.pixelBufferValues.set(item.id, buf); });
+}
 
-    const imageHeaderTags = document.createElement('div');
-    imageHeaderTags.className = 'lightbox-image-header-tags';
+// Lazily start pixel decode for the SDR version of an item.
+// The SDR file is 8-bit sRGB AVIF — decoded the same way by pixel-worker,
+// but we store it separately so HDR and SDR buffers can coexist.
+function _startSdrPixelDecode(item) {
+    if (lightboxState.sdrPixelBuffers.has(item.id)) return;
+    const entry = lightboxState.blobUrls.get(item.id);
+    if (!entry?.sdrUrl) return;
+    const _t0 = lightboxState.openTime || performance.now();
+    const p = new Promise(resolve => {
+        const worker = new Worker('./pixel-worker.js', { type: 'module' });
+        fetch(entry.sdrUrl)
+            .then(r => r.arrayBuffer())
+            .then(ab => worker.postMessage({ arrayBuffer: ab }, [ab]));
+        worker.onmessage = e => {
+            worker.terminate();
+            resolve(e.data.error ? null : e.data);
+        };
+        worker.onerror = () => { worker.terminate(); resolve(null); };
+    });
+    lightboxState.sdrPixelBuffers.set(item.id, p);
+    p.then(buf => { if (buf) lightboxState.sdrPixelBufferValues.set(item.id, buf); });
+}
 
-    const imageHeaderTitle = document.createElement('div');
-    imageHeaderTitle.className = 'lightbox-image-header-title';
+// sRGB EOTF: gamma-encoded [0,1] → linear, then scale to cd/m²
+// SDR reference white = 203 cd/m² (IEC 61966-2-1 / HLG mapping)
+function _srgbEotf(v) {
+    const c = Math.max(0, Math.min(1, v));
+    return (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)) * 203;
+}
+
+// Like getNitsAtPixel but treats the buffer as 8-bit sRGB (SDR tonemap output).
+// The pixel worker scales 8-bit values to 16-bit big-endian, so we divide by 65535.
+function _getNitsAtPixelSdr(pixelBuffer, imgX, imgY) {
+    const { pixels, width, height, samplesPerPixel } = pixelBuffer;
+    const px = Math.max(0, Math.min(width  - 1, Math.floor(imgX)));
+    const py = Math.max(0, Math.min(height - 1, Math.floor(imgY)));
+    const base = (py * width + px) * samplesPerPixel * 2;
+    const r = _srgbEotf((pixels[base]     << 8 | pixels[base + 1]) / 65535);
+    const g = _srgbEotf((pixels[base + 2] << 8 | pixels[base + 3]) / 65535);
+    const b = _srgbEotf((pixels[base + 4] << 8 | pixels[base + 5]) / 65535);
+    return {
+        rNits: r, gNits: g, bNits: b,
+        luminance: 0.2126 * r + 0.7152 * g + 0.0722 * b,
+        gamut: 'SDR',
+    };
+}
+
+// Assign a dedicated pool slot for a URL (one slot per URL, no eviction).
+// Returns the pool <img> element so callers can call .decode() on it.
+function _poolPrefetch(url) {
+    if (lightboxState.poolSlots.has(url)) return lightboxState.poolSlots.get(url); // already has a slot
+    if (!lightboxState.decodePool) return null; // pool not open yet
+    const img = document.createElement('img');
+    img.src = url;
+    lightboxState.decodePool.appendChild(img);
+    lightboxState.poolSlots.set(url, img);
+    _prefetchedImages.set(url, img); // keep _prefetchedImages in sync for legacy references
+    return img;
+}
+
+// ─── Compare Mode ────────────────────────────────────────────────────────────
+
+// Opens the normal lightbox for item1, with item2 wired in as the slider's
+// overlay target (via the existing SDR Slider button) instead of item1's SDR.
+async function openCompareLightbox(id1, id2) {
+    let item1, item2;
+    try {
+        [item1, item2] = await Promise.all([getImageFile(id1), getImageFile(id2)]);
+    } catch (err) {
+        console.error('[compare] failed to load images:', err);
+        showStatusMessage('Compare: failed to load one or both images', 'error');
+        return;
+    }
+    if (!item1 || !item2) {
+        showStatusMessage('Compare: one or both image IDs were not found', 'error');
+        return;
+    }
+    lightboxState.compareTargetItem = item2;
+    openLightbox([item1], 0);
+    if (lightboxState.blobUrls) {
+        lightboxState.blobUrls.set(item2.id, {
+            url: item2.thumbUrl || item2.hdrUrl,
+            fullUrl: item2.hdrUrl,
+            blob: null,
+            sdrUrl: item2.sdrUrl || null,
+        });
+    }
+    // Auto-open the slider once the toolbar exists (renderLightboxImage runs async).
+    const _tryClick = () => {
+        const btn = document.querySelector('.js-compare-slider-btn');
+        if (btn) btn.click();
+        else if (lightboxState.open) setTimeout(_tryClick, 50);
+    };
+    setTimeout(_tryClick, 50);
+}
+
+// If the URL has ?compare=id1,id2, open the comparison lightbox — called after
+// refreshGallery() finishes (see DOMContentLoaded below), NOT at parse time.
+// Reason: opening it too early raced against buildGalleryCards()'s
+// imageWrappers.clear(), which could wipe the freshly-registered lightbox
+// wrapper entry before the Analysis Tool panel could read it (imo panel
+// silently never appearing, Chrome/Edge only — timing-dependent).
+function _checkCompareUrl() {
+    const ids = (new URLSearchParams(window.location.search).get('compare') || '')
+        .split(',').map(s => s.trim()).filter(Boolean);
+    if (ids.length === 2) openCompareLightbox(ids[0], ids[1]);
+}
+
+// Handles zoom/pan (hold-to-zoom, scroll-to-zoom, momentum pan), touch gestures
+// (swipe nav, pinch-zoom, single-finger pan), idle cursor hide, window resize
+// reset, and the main render/navigation function (which also owns the SDR/HDR
+// compare slider, filmstrip rebuild-on-nav, and edit/delete/compare button wiring).
+// This is the bulk of the lightbox's interactive behavior; it all shares one
+// pool of mutable state (zoom transform, pan velocity, touch state, etc.) which
+// is why it's kept together here rather than split into fully independent
+// functions communicating through return values.
+function _setupImageInteraction(overlay, imageWrapper, imgContainer, imgEl, imageArea, filmstrip, imageHeaderRight, imageHeaderSubtitle, imageHeaderTags, imageHeaderTitle, prevBtn, nextBtn, toolbar, compareBtn, sdrToggleBtn, editBtn, deleteBtn, sep2) {
 
     // Helper — updates title text and link state whenever the image changes.
+    // (Needs imageHeaderTitle, created earlier in openLightbox, passed in above.)
     function _setLightboxTitle(gameName) {
         const name = gameName || 'Unknown Game';
         imageHeaderTitle.textContent = name;
@@ -1277,264 +1366,7 @@ function openLightbox(batchItems, startIndex) {
         }
     }
 
-    _setLightboxTitle(lightboxBatch[startIndex].gameName);
-
-    const imageHeaderSubtitle = document.createElement('div');
-    imageHeaderSubtitle.className = 'lightbox-image-header-subtitle';
-    const _initAdditionalInfo = lightboxBatch[startIndex].additionalInfo || '';
-    imageHeaderSubtitle.textContent = _initAdditionalInfo;
-    imageHeaderSubtitle.style.display = (_initAdditionalInfo && !_compareTargetItem) ? '' : 'none';
-
-    const imageHeaderTitleWrap = document.createElement('div');
-    imageHeaderTitleWrap.className = 'lightbox-image-header-title-wrap';
-    imageHeaderTitleWrap.appendChild(imageHeaderTitle);
-    imageHeaderTitleWrap.appendChild(imageHeaderSubtitle);
-
-    imageHeader.appendChild(imageHeaderTags);
-    imageHeader.appendChild(imageHeaderTitleWrap);
-    const imageHeaderRight = document.createElement('div');
-    imageHeader.appendChild(imageHeaderRight);
-    imageWrapper.appendChild(imageHeader);
-
-    const imgEl = document.createElement('img');
-    imgEl.className = 'lightbox-image';
-    const imgContainer = document.createElement('div');
-    imgContainer.className = 'lightbox-image-container';
-    imgContainer.appendChild(imgEl);
-    imageWrapper.appendChild(imgContainer);
-
-    // ── Toolbar ──
-    const toolbar = document.createElement('div');
-    toolbar.className = 'lightbox-toolbar';
-    overlay.appendChild(toolbar);
-
-    // Inner wrapper — constrains buttons to the same width as the image area
-    const toolbarInner = document.createElement('div');
-    toolbarInner.className = 'lightbox-toolbar-inner';
-    toolbar.appendChild(toolbarInner);
-
-    // Left side: view/analysis buttons
-    const toolbarLeft = document.createElement('div');
-    toolbarLeft.className = 'lightbox-toolbar-left';
-    toolbarInner.appendChild(toolbarLeft);
-
-    // Right side: edit/manage buttons
-    const toolbarRight = document.createElement('div');
-    toolbarRight.className = 'lightbox-toolbar-right';
-    toolbarInner.appendChild(toolbarRight);
-
-    // ── Copy Link button (right side) ──
-    const copyLinkBtn = document.createElement('button');
-    copyLinkBtn.className = 'button-secondary lightbox-copy-link-btn';
-    copyLinkBtn.title = 'Copy link';
-    copyLinkBtn.dataset.tooltip = 'Copy Link';
-    copyLinkBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg><span class="btn-label"> Copy Link</span>';
-    copyLinkBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const item = lightboxBatch[lightboxIndex];
-        if (!item) return;
-
-        const url = new URL(location.href);
-        url.search = '';
-
-        if (_compareTargetItem) {
-            url.searchParams.set('compare', `${item.id},${_compareTargetItem.id}`);
-        } else {
-            url.searchParams.set('img', item.id);
-        }
-
-        if (gameSearchQuery.trim()) {
-            url.searchParams.set('game', gameSearchQuery.trim());
-        } else {
-            url.searchParams.delete('game');
-        }
-
-        const copyText = url.toString();
-
-        navigator.clipboard.writeText(copyText).then(() => {
-            copyLinkBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg><span class="btn-label"> Copied!</span>';
-            copyLinkBtn.classList.add('lightbox-copy-link-btn--copied');
-            setTimeout(() => {
-                copyLinkBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg><span class="btn-label"> Copy Link</span>';
-                copyLinkBtn.classList.remove('lightbox-copy-link-btn--copied');
-            }, 2000);
-        }).catch(() => {
-            const ta = document.createElement('textarea');
-            ta.value = copyText;
-            ta.style.position = 'fixed'; ta.style.opacity = '0';
-            document.body.appendChild(ta);
-            ta.select();
-            document.execCommand('copy');
-            ta.remove();
-        });
-    });
-    toolbarRight.appendChild(copyLinkBtn);
-
-    // ── Filmstrip ──
-    const filmstrip = document.createElement('div');
-    filmstrip.className = 'lightbox-filmstrip';
-    overlay.appendChild(filmstrip);
-
-    // ── Filmstrip mousewheel horizontal scroll (smooth) ──
-    let _fsTarget = 0;
-    let _fsRaf = null;
-
-    function _fsAnimateLerp() {
-        const diff = _fsTarget - filmstrip.scrollLeft;
-        if (Math.abs(diff) < 0.5) {
-            filmstrip.scrollLeft = _fsTarget;
-            _fsRaf = null;
-            return;
-        }
-        filmstrip.scrollLeft += diff * 0.18;
-        _fsRaf = requestAnimationFrame(_fsAnimateLerp);
-    }
-
-    filmstrip.addEventListener('wheel', (e) => {
-        e.preventDefault();
-        const delta = e.deltaY !== 0 ? e.deltaY : e.deltaX;
-        const maxScroll = filmstrip.scrollWidth - filmstrip.clientWidth;
-        _fsTarget = Math.max(0, Math.min(maxScroll, _fsTarget + delta));
-        if (!_fsRaf) _fsRaf = requestAnimationFrame(_fsAnimateLerp);
-    }, { passive: false });
-
-    // ── Nav arrows ──
-    const prevBtn = document.createElement('button');
-    prevBtn.className = 'lightbox-nav lightbox-nav-prev';
-    prevBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>';
-    prevBtn.addEventListener('click', () => navigateLightbox(-1));
-    overlay.appendChild(prevBtn);
-
-    const nextBtn = document.createElement('button');
-    nextBtn.className = 'lightbox-nav lightbox-nav-next';
-    nextBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>';
-    nextBtn.addEventListener('click', () => navigateLightbox(1));
-    overlay.appendChild(nextBtn);
-
-    // ── Close button ──
-    const closeBtn = document.createElement('button');
-    closeBtn.className = 'lightbox-close';
-    closeBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
-    closeBtn.addEventListener('click', closeLightbox);
-    overlay.appendChild(closeBtn);
-
-    document.body.appendChild(overlay);
-    document.body.style.overflow = 'hidden';
-    document.documentElement.style.overflow = 'hidden';
-
-    _lightboxHdrInfoBar = document.createElement('div');
-    _lightboxHdrInfoBar.className = 'hdr-info-bar hdr-info-bar-sdr lightbox-hdr-info-bar';
-    _lightboxHdrInfoBar.style.display = 'none';
-    _lightboxHdrInfoBar.innerHTML = `
-        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-        <span><span class="sdr-browser-tip"><strong>No HDR signal detected</strong><span class="sdr-browser-tooltip"><strong>Browser HDR compatibility</strong><span class="sdr-browser-row"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#1bc174" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> Chromium-based: Chrome, Edge…</span><span class="sdr-browser-row"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#f87171" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg> Firefox</span></span></span> — Enable HDR on Windows and use a <span class="sdr-browser-tip"><strong>compatible browser</strong><span class="sdr-browser-tooltip"><strong>Browser HDR compatibility</strong><span class="sdr-browser-row"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#1bc174" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> Chromium-based: Chrome, Edge…</span><span class="sdr-browser-row"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#f87171" stroke-width="2.5" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg> Firefox</span></span></span>.</span>`;
-    overlay.appendChild(_lightboxHdrInfoBar);
-    _lightboxHdrInfoBarMq = window.matchMedia('(dynamic-range: high)');
-    if (typeof _lightboxHdrInfoBarMq.addEventListener === 'function') {
-        _lightboxHdrInfoBarMq.addEventListener('change', _updateLightboxHdrInfoBar);
-    } else if (typeof _lightboxHdrInfoBarMq.addListener === 'function') {
-        _lightboxHdrInfoBarMq.addListener(_updateLightboxHdrInfoBar);
-    }
-    _updateLightboxHdrInfoBar();
-
-    _lightboxHdrInfoBar.querySelectorAll('.sdr-browser-tip').forEach(_sdrTip => {
-        const _sdrTipBox = _sdrTip.querySelector('.sdr-browser-tooltip');
-        if (!_sdrTipBox) return;
-        _sdrTip.addEventListener('mouseenter', () => {
-            _sdrTipBox.style.visibility = 'hidden';
-            _sdrTipBox.style.display = 'flex';
-            _sdrTipBox.style.top = '0';
-            _sdrTipBox.style.left = '0';
-            const r = _sdrTip.getBoundingClientRect();
-            const tipW = _sdrTipBox.offsetWidth;
-            let left = r.left + r.width / 2 - tipW / 2;
-            left = Math.max(8, Math.min(left, window.innerWidth - tipW - 8));
-            _sdrTipBox.style.top = (r.bottom + 8) + 'px';
-            _sdrTipBox.style.left = left + 'px';
-            _sdrTipBox.style.visibility = 'visible';
-        });
-        _sdrTip.addEventListener('mouseleave', () => {
-            _sdrTipBox.style.display = 'none';
-        });
-    });
-
-    // Trigger fade-in only once the first image is decoded — so image and overlay fade in together
-    const firstEntry = lightboxBlobUrls.get(lightboxBatch[startIndex].id);
-    const preloader = new Image();
-    preloader.src = firstEntry.fullUrl;
-    const triggerFade = () => requestAnimationFrame(() => { overlay.style.opacity = '1'; });
-    preloader.decode().then(triggerFade).catch(triggerFade); // catch: fade in anyway if decode fails
-
-    // ── LEFT side: Analysis Tool, SDR Slider, SDR Toggle, Save ──
-    const detailsBtn = document.createElement('button');
-    detailsBtn.className = 'button-secondary detail-button' + (globalDetailsEnabled ? ' button-active' : '');
-    detailsBtn.innerHTML = globalDetailsEnabled
-        ? '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg><span class="btn-label"> <u>A</u>nalysis Tool</span>'
-        : '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" opacity="0.3"></path><circle cx="12" cy="12" r="3"></circle></svg><span class="btn-label"> <u>A</u>nalysis Tool</span>';
-    detailsBtn.title = 'Analysis Tool (A)';
-    detailsBtn.dataset.tooltip = 'Analysis Tool (A)';
-    detailsBtn.onclick = () => {
-        const hasActiveCompareSlider = !!document.querySelector('#lightbox-overlay .inline-comparison-slider');
-        if (hasActiveCompareSlider && !globalDetailsEnabled && !_compareTargetItem) return;
-        toggleGlobalDetailsMode();
-    };
-    toolbarLeft.appendChild(detailsBtn);
-
-    const sep0 = document.createElement('div');
-    sep0.className = 'toolbar-separator';
-    toolbarLeft.appendChild(sep0);
-
-    const compareBtn = document.createElement('button');
-    compareBtn.className = 'button-secondary js-compare-slider-btn';
-    compareBtn.title = _compareTargetItem ? 'Compare Slider (S)' : 'SDR Slider (S)';
-    compareBtn.dataset.tooltip = compareBtn.title;
-    compareBtn.innerHTML = _compareTargetItem
-        ? '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12H3"/><path d="m7 8-4 4 4 4"/><path d="m17 8 4 4-4 4"/></svg><span class="btn-label"> Compare</span>'
-        : '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12H3"/><path d="m7 8-4 4 4 4"/><path d="m17 8 4 4-4 4"/></svg><span class="btn-label"> <u>S</u>DR Slider</span>';
-    toolbarLeft.appendChild(compareBtn);
-
-    function _compareBtnIconHTML() {
-        return _compareTargetItem
-            ? '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12H3"/><path d="m7 8-4 4 4 4"/><path d="m17 8 4 4-4 4"/></svg><span class="btn-label"> Compare</span>'
-            : '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12H3"/><path d="m7 8-4 4 4 4"/><path d="m17 8 4 4-4 4"/></svg><span class="btn-label"> <u>S</u>DR Slider</span>';
-    }
-
-    const sdrToggleBtn = document.createElement('div');
-    sdrToggleBtn.className = 'sdr-pill-toggle';
-    if (_compareTargetItem) {
-        sdrToggleBtn.title = 'Swap compared images (D)';
-        sdrToggleBtn.dataset.tooltip = 'Swap compared images (D)';
-        sdrToggleBtn.innerHTML = '<span class="sdr-pill-seg sdr-pill-seg--active" data-seg="image1">Image 1</span><span class="sdr-pill-seg" data-seg="image2">Image 2</span>';
-    } else {
-        sdrToggleBtn.title = 'SDR Toggle (D)';
-        sdrToggleBtn.dataset.tooltip = 'SDR Toggle (D)';
-        sdrToggleBtn.innerHTML = '<span class="sdr-pill-seg" data-seg="sdr">SDR</span><span class="sdr-pill-seg sdr-pill-seg--active" data-seg="hdr">HDR</span>';
-    }
-    toolbarLeft.appendChild(sdrToggleBtn);
-
-    const sep1 = document.createElement('div');
-    sep1.className = 'toolbar-separator';
-    toolbarLeft.appendChild(sep1);
-
-
-    // ── RIGHT side: Edit, Copy Link | separator | Delete, Delete All ──
-    const editBtn = document.createElement('button');
-    editBtn.className = 'button-secondary';
-    editBtn.title = 'Edit details';
-    editBtn.dataset.tooltip = 'Edit';
-    editBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg><span class="btn-label"> Edit</span>';
-    toolbarRight.insertBefore(editBtn, copyLinkBtn);
-
-    const sep2 = document.createElement('div');
-    sep2.className = 'toolbar-separator';
-    toolbarRight.appendChild(sep2);
-
-    const deleteBtn = document.createElement('button');
-    deleteBtn.className = 'button-danger';
-    deleteBtn.title = 'Delete image';
-    deleteBtn.dataset.tooltip = 'Delete';
-    deleteBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg><span class="btn-label"> Delete</span>';
-    toolbarRight.appendChild(deleteBtn);
+    _setLightboxTitle(lightboxState.batch[lightboxState.index].gameName);
 
     // ── Hold-to-zoom ──
     let isZooming = false;
@@ -1565,26 +1397,6 @@ function openLightbox(batchItems, startIndex) {
         imageWrapper.querySelectorAll('.imo-panel').forEach(p => p.classList.remove('imo-panel-zoom-hidden'));
     }
 
-    // [imo-zoom-debug] Logs the rects of the image container / imo overlay / imo
-    // panel so we can see whether the container collapses (and drags the panel
-    // with it) when the image switches to position:fixed during zoom.
-    function _logImoZoomRects(label) {
-        const container = imageWrapper.querySelector('.lightbox-image-container');
-        const overlay   = imageWrapper.querySelector('.image-meta-overlay');
-        const panel     = imageWrapper.querySelector('.imo-panel');
-        const r = (el) => {
-            if (!el) return 'null';
-            const rect = el.getBoundingClientRect();
-            return `x=${Math.round(rect.x)} y=${Math.round(rect.y)} w=${Math.round(rect.width)} h=${Math.round(rect.height)}`;
-        };
-        console.log(
-            `[imo-zoom-debug] ${label} | imgPosition=${getComputedStyle(imgEl).position}` +
-            ` | container(${r(container)})` +
-            ` | overlay(${r(overlay)})` +
-            ` | panel(${r(panel)})` +
-            ` | panelInline(left=${panel ? panel.style.left : 'n/a'}, top=${panel ? panel.style.top : 'n/a'})`
-        );
-    }
 
     // ── Scroll-to-zoom (velocity + friction momentum) ──
     // Uses translate(tx, ty) scale(S) with transformOrigin: 0 0 — the standard
@@ -1710,7 +1522,6 @@ function openLightbox(batchItems, startIndex) {
         zoomTooltip.style.display = 'none';
         _clearZoomIdleTimer();
 
-        _logImoZoomRects('startZoomExit: BEFORE removing lightbox-image-zooming');
         let finished = false;
         const finish = () => {
             if (finished) return;
@@ -1723,8 +1534,6 @@ function openLightbox(batchItems, startIndex) {
             imgEl.style.transform = '';
             imgEl.style.transformOrigin = '';
             _unlockZoomContainerSize();
-            _logImoZoomRects('startZoomExit: AFTER removing lightbox-image-zooming (same tick)');
-            requestAnimationFrame(() => _logImoZoomRects('startZoomExit: AFTER 1 rAF (post-layout)'));
         };
 
         if (naturalRect) {
@@ -1831,7 +1640,6 @@ function openLightbox(batchItems, startIndex) {
 
         // Capture natural rect, switch to fixed, apply FLIP inverse instantly
         naturalRect = imgEl.getBoundingClientRect();
-        _logImoZoomRects('mousedown hold-zoom: BEFORE adding lightbox-image-zooming');
         _lockZoomContainerSize();
         const { tx: ftx, ty: fty, s: fs } = _flipTransform(naturalRect);
         imgEl.classList.add('lightbox-image-zooming');
@@ -1841,8 +1649,6 @@ function openLightbox(batchItems, startIndex) {
         imgEl.style.transform = `translate(${ftx}px,${fty}px) scale(${fs})`;
         zoomTooltip.innerHTML = `<svg class="zoom-icon" xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>1.0× zoom`;
         if (lbMouseInside) zoomTooltip.style.display = 'block';
-        _logImoZoomRects('mousedown hold-zoom: AFTER adding lightbox-image-zooming (same tick)');
-        requestAnimationFrame(() => _logImoZoomRects('mousedown hold-zoom: AFTER 1 rAF (post-layout)'));
 
         // Animate to 1× centered — translate(0,0) scale(1) is identical to the wheel-entry
         // target and guarantees the image fits inside the visible viewport at every screen size.
@@ -1854,7 +1660,6 @@ function openLightbox(batchItems, startIndex) {
                 setTimeout(() => {
                     imgEl.style.transition = 'none';
                     startScrollZoomRaf();
-                    _logImoZoomRects('mousedown hold-zoom: zoom settled at 1x');
                 }, 190);
             });
         });
@@ -1917,7 +1722,6 @@ function openLightbox(batchItems, startIndex) {
 
                 // Capture natural rect, switch to fixed layout, apply FLIP inverse instantly
                 naturalRect = imgEl.getBoundingClientRect();
-                _logImoZoomRects('wheel scroll-zoom: BEFORE adding lightbox-image-zooming');
                 _lockZoomContainerSize();
                 const { tx: ftx, ty: fty, s: fs } = _flipTransform(naturalRect);
                 imgEl.classList.add('lightbox-image-zooming');
@@ -1926,8 +1730,6 @@ function openLightbox(batchItems, startIndex) {
                 imgEl.style.transition = 'none';
                 imgEl.style.transformOrigin = '0 0';
                 imgEl.style.transform = `translate(${ftx}px,${fty}px) scale(${fs})`;
-                _logImoZoomRects('wheel scroll-zoom: AFTER adding lightbox-image-zooming (same tick)');
-                requestAnimationFrame(() => _logImoZoomRects('wheel scroll-zoom: AFTER 1 rAF (post-layout)'));
 
                 // Double-rAF: first frame commits the FLIP inverse, second starts the transition
                 requestAnimationFrame(() => {
@@ -1937,7 +1739,6 @@ function openLightbox(batchItems, startIndex) {
                         setTimeout(() => {
                             imgEl.style.transition = 'none';
                             startScrollZoomRaf();
-                            _logImoZoomRects('wheel scroll-zoom: zoom settled at 1x');
                         }, 190);
                     });
                 });
@@ -2018,17 +1819,17 @@ function openLightbox(batchItems, startIndex) {
 
     // When the compare slider shows two different images (via ?compare=), figure
     // out which one is actually visible under the cursor — left of the divider
-    // shows lightboxBatch[lightboxIndex] (item1), right shows _compareTargetItem
+    // shows lightboxState.batch[lightboxState.index] (item1), right shows lightboxState.compareTargetItem
     // (item2), matching the fixed layout set up in compareBtn.onclick. Returns
     // null when there's no dual-image compare active (single-item SDR slider, etc).
     function _compareSideItemAt(clientX) {
-        if (!_compareTargetItem) return null;
+        if (!lightboxState.compareTargetItem) return null;
         const sliderEl = imageWrapper.querySelector('.inline-comparison-slider');
         const dividerEl = sliderEl?.querySelector('.inline-comparison-divider');
         if (!dividerEl) return null;
         const dRect = dividerEl.getBoundingClientRect();
         const splitX = dRect.left + dRect.width / 2;
-        return clientX < splitX ? lightboxBatch[lightboxIndex] : _compareTargetItem;
+        return clientX < splitX ? lightboxState.batch[lightboxState.index] : lightboxState.compareTargetItem;
     }
 
     // ── Idle cursor/tooltip hide in zoom mode ──
@@ -2063,7 +1864,7 @@ function openLightbox(batchItems, startIndex) {
             }
         }, 1000);
     }
-    _lightboxResetZoomIdleTimer = _resetZoomIdleTimer;
+    lightboxState.resetZoomIdleTimer = _resetZoomIdleTimer;
 
     imgEl.addEventListener('mouseenter', async () => {
         lbMouseInside = true;
@@ -2085,22 +1886,22 @@ function openLightbox(batchItems, startIndex) {
             }
         }
         if (!globalDetailsEnabled) return;
-        const _curItem = _compareSideItemAt(lastCursorX) || _getVisibleLightboxItem() || lightboxBatch[lightboxIndex];
-        if (_compareTargetItem) {
+        const _curItem = _compareSideItemAt(lastCursorX) || _getVisibleLightboxItem() || lightboxState.batch[lightboxState.index];
+        if (lightboxState.compareTargetItem) {
             // Make sure both compared images are decoding — needed so mousemove
             // can switch buffers instantly as the cursor crosses the divider.
             if (lbSdrMode) {
-                _startSdrPixelDecode(lightboxBatch[lightboxIndex]);
-                _startSdrPixelDecode(_compareTargetItem);
+                _startSdrPixelDecode(lightboxState.batch[lightboxState.index]);
+                _startSdrPixelDecode(lightboxState.compareTargetItem);
             } else {
-                _startPixelDecode(lightboxBatch[lightboxIndex]);
-                _startPixelDecode(_compareTargetItem);
+                _startPixelDecode(lightboxState.batch[lightboxState.index]);
+                _startPixelDecode(lightboxState.compareTargetItem);
             }
         }
-        if (!lbPixelBuffer || (_compareTargetItem && lbPixelBuffer !== (lbSdrMode ? lightboxSdrPixelBufferValues.get(_curItem.id) : lightboxPixelBufferValues.get(_curItem.id)))) {
+        if (!lbPixelBuffer || (lightboxState.compareTargetItem && lbPixelBuffer !== (lbSdrMode ? lightboxState.sdrPixelBufferValues.get(_curItem.id) : lightboxState.pixelBufferValues.get(_curItem.id)))) {
             const bufPromise = lbSdrMode
-                ? lightboxSdrPixelBuffers.get(_curItem.id)
-                : lightboxPixelBuffers.get(_curItem.id);
+                ? lightboxState.sdrPixelBuffers.get(_curItem.id)
+                : lightboxState.pixelBuffers.get(_curItem.id);
             if (bufPromise) {
                 nitTooltip.style.display = 'block';
                 nitTooltip.innerHTML = _NIT_LOADING_HTML;
@@ -2131,13 +1932,13 @@ function openLightbox(batchItems, startIndex) {
         _resetZoomIdleTimer();
         if (!globalDetailsEnabled) return;
 
-        if (_compareTargetItem) {
+        if (lightboxState.compareTargetItem) {
             // Dual-image compare: switch buffers live as the cursor crosses the
             // divider, instead of only following whichever image the D-toggle
             // last selected.
             const sideItem = _compareSideItemAt(e.clientX);
             const sideBuf = sideItem
-                ? (lbSdrMode ? lightboxSdrPixelBufferValues.get(sideItem.id) : lightboxPixelBufferValues.get(sideItem.id))
+                ? (lbSdrMode ? lightboxState.sdrPixelBufferValues.get(sideItem.id) : lightboxState.pixelBufferValues.get(sideItem.id))
                 : null;
             if (sideBuf) {
                 lbPixelBuffer = sideBuf;
@@ -2146,7 +1947,7 @@ function openLightbox(batchItems, startIndex) {
             }
         } else {
             if (!lbPixelBuffer) return;
-            const _curItem = _getVisibleLightboxItem() || lightboxBatch[lightboxIndex];
+            const _curItem = _getVisibleLightboxItem() || lightboxState.batch[lightboxState.index];
             if (_curItem?.id !== currentVisibleImage) {
                 lbPixelBuffer = null;
                 return;
@@ -2328,7 +2129,7 @@ function openLightbox(batchItems, startIndex) {
 
     // ── Render function (called on init and navigation) ──
     async function renderLightboxImage() {
-        const item = lightboxBatch[lightboxIndex];
+        const item = lightboxState.batch[lightboxState.index];
         // Update the page URL so this image has a shareable link, unless the
         // current URL is already using compare mode and should stay focused on it.
         const _shareUrl = new URL(location.href);
@@ -2345,7 +2146,6 @@ function openLightbox(batchItems, startIndex) {
         }
         history.replaceState(null, '', _shareUrl.toString());
         const _t0 = performance.now();
-        console.log(`[lightbox] renderLightboxImage() start  +0ms`);
         lbPixelBuffer = null; // reset buffer for new image
         lbSdrMode = false;
         lbLastPixelX = -1; lbLastPixelY = -1;
@@ -2371,16 +2171,16 @@ function openLightbox(batchItems, startIndex) {
             if (existingSlider._cleanup) existingSlider._cleanup();
             existingSlider.remove();
         }
-        lightboxSdrActive = false;
+        lightboxState.sdrActive = false;
         compareBtn.classList.remove('button-active');
         compareBtn.innerHTML = _compareBtnIconHTML();
 
         // Reset SDR full-view toggle / sync compare-image pill to current state.
         // The 'hdr' seg check below only applies outside compare mode — in compare
         // mode the pill has 'image1'/'image2' segs, so use _setSdrPill to keep the
-        // highlight in sync with lightboxCompareImageActive instead of blanking it.
-        lightboxSdrToggleActive = false;
-        if (_compareTargetItem) {
+        // highlight in sync with lightboxState.compareImageActive instead of blanking it.
+        lightboxState.sdrToggleActive = false;
+        if (lightboxState.compareTargetItem) {
             _setSdrPill();
         } else {
             sdrToggleBtn.classList.remove('sdr-active');
@@ -2441,7 +2241,7 @@ function openLightbox(batchItems, startIndex) {
                     // Also unblur the filmstrip thumb and remove its SPOILER label
                     const _items = filmstrip.querySelectorAll('.lightbox-filmstrip-item');
                     _items.forEach((_item, _i) => {
-                        if (lightboxBatch[_i]?.id === item.id) {
+                        if (lightboxState.batch[_i]?.id === item.id) {
                             _item.querySelector('.lightbox-filmstrip-thumb')?.classList.remove('lightbox-filmstrip-thumb-spoiler');
                             _item.querySelector('.lightbox-filmstrip-spoiler-label')?.remove();
                         }
@@ -2451,34 +2251,30 @@ function openLightbox(batchItems, startIndex) {
         }
 
         // Update main image — always use full-res original for accurate HDR rendering
-        const { url: displayUrl, fullUrl, blob } = lightboxBlobUrls.get(item.id);
+        const { url: displayUrl, fullUrl, blob } = lightboxState.blobUrls.get(item.id);
         // Only reassign src if the URL actually changed — skipping it avoids a blank
         // flash when the bitmap is already painted (e.g. navigating back to a cached image).
         if (imgEl.src !== fullUrl) {
-            console.log(`[lightbox] setting imgEl.src  +${(performance.now()-_t0).toFixed(1)}ms`);
             imgEl.onerror = () => console.warn(`[lightbox] imgEl onerror fired  +${(performance.now()-_t0).toFixed(1)}ms`);
-            imgEl.onload = () => { imgEl.onload = null; console.log(`[lightbox] imgEl onload fired  +${(performance.now()-_t0).toFixed(1)}ms`); };
+            imgEl.onload = () => { imgEl.onload = null; };
             imgEl.src = fullUrl;
         } else {
-            console.log(`[lightbox] imgEl.src unchanged, skipping reassign  +${(performance.now()-_t0).toFixed(1)}ms`);
         }
         // Reuse in-flight hover prefetch promise if available, otherwise start fresh.
         const _existingDecode = _decodePromises.get(fullUrl);
         if (_existingDecode) {
             _existingDecode.then(() => {
-                console.log(`[lightbox] imgEl.decode() complete (bitmap ready to paint)  +${(performance.now()-_t0).toFixed(1)}ms (reused prefetch)`);
             }).catch(() => {});
         } else {
             const p = imgEl.decode().then(() => {
-                console.log(`[lightbox] imgEl.decode() complete (bitmap ready to paint)  +${(performance.now()-_t0).toFixed(1)}ms`);
             }).catch(() => {});
             _decodePromises.set(fullUrl, p);
         }
 
         // Register in imageWrappers for global details system
         imageWrappers.set(item.id, { wrapper: imageWrapper, metadata: item.metadata || null, imageItem: item, compareButton: compareBtn, sdrToggle: sdrToggleBtn });
-        if (_compareTargetItem) {
-            imageWrappers.set(_compareTargetItem.id, { wrapper: imageWrapper, metadata: _compareTargetItem.metadata || null, imageItem: _compareTargetItem, compareButton: compareBtn, sdrToggle: sdrToggleBtn });
+        if (lightboxState.compareTargetItem) {
+            imageWrappers.set(lightboxState.compareTargetItem.id, { wrapper: imageWrapper, metadata: lightboxState.compareTargetItem.metadata || null, imageItem: lightboxState.compareTargetItem, compareButton: compareBtn, sdrToggle: sdrToggleBtn });
         }
         currentVisibleImage = item.id;
 
@@ -2500,7 +2296,7 @@ function openLightbox(batchItems, startIndex) {
         _setLightboxTitle(item.gameName);
         const _navAdditionalInfo = item.additionalInfo || '';
         imageHeaderSubtitle.textContent = _navAdditionalInfo;
-        imageHeaderSubtitle.style.display = (_navAdditionalInfo && !_compareTargetItem) ? '' : 'none';
+        imageHeaderSubtitle.style.display = (_navAdditionalInfo && !lightboxState.compareTargetItem) ? '' : 'none';
         const hdrTypeDef = HDR_TYPES.find(t => t.id === item.hdrType);
         let lbHdrLabel = null;
         let lbHdrClass = '';
@@ -2520,7 +2316,7 @@ function openLightbox(batchItems, startIndex) {
 
         // Update filmstrip active state
         filmstrip.querySelectorAll('.lightbox-filmstrip-item').forEach((item, i) => {
-            item.classList.toggle('lightbox-filmstrip-thumb-active', i === lightboxIndex);
+            item.classList.toggle('lightbox-filmstrip-thumb-active', i === lightboxState.index);
         });
         // Scroll active thumbnail into view (touch / keyboard navigation)
         requestAnimationFrame(() => {
@@ -2529,10 +2325,10 @@ function openLightbox(batchItems, startIndex) {
         });
 
         // Nav arrow visibility
-        prevBtn.style.opacity = lightboxIndex === 0 ? '0.25' : '1';
-        prevBtn.style.pointerEvents = lightboxIndex === 0 ? 'none' : '';
-        nextBtn.style.opacity = lightboxIndex === lightboxBatch.length - 1 ? '0.25' : '1';
-        nextBtn.style.pointerEvents = lightboxIndex === lightboxBatch.length - 1 ? 'none' : '';
+        prevBtn.style.opacity = lightboxState.index === 0 ? '0.25' : '1';
+        prevBtn.style.pointerEvents = lightboxState.index === 0 ? 'none' : '';
+        nextBtn.style.opacity = lightboxState.index === lightboxState.batch.length - 1 ? '0.25' : '1';
+        nextBtn.style.pointerEvents = lightboxState.index === lightboxState.batch.length - 1 ? 'none' : '';
 
         // Show/hide owner-only buttons based on whether the current user uploaded this image
         editBtn.style.display       = 'none';
@@ -2546,7 +2342,7 @@ function openLightbox(batchItems, startIndex) {
 
         // Start pixel decode only if analysis tool is active
         if (globalDetailsEnabled) _startPixelDecode(item);
-        const bufPromise = lightboxPixelBuffers.get(item.id);
+        const bufPromise = lightboxState.pixelBuffers.get(item.id);
         if (bufPromise) {
             // Show loading indicator immediately if mouse is already over the image
             if (lbMouseInside && globalDetailsEnabled) {
@@ -2575,7 +2371,7 @@ function openLightbox(batchItems, startIndex) {
             if (result === null) return;
             const { hdrType: newHdrType, gameName: newGameName, spoiler: newSpoiler, hidden: newHidden, additionalInfo: newAdditionalInfo } = result;
             // Update all items in the batch in memory so navigation picks up the new name immediately
-            lightboxBatch.forEach(batchItem => {
+            lightboxState.batch.forEach(batchItem => {
                 if (batchItem.batchId === item.batchId || batchItem.id === item.id) {
                     batchItem.gameName = newGameName;
                     batchItem.hdrType  = newHdrType;
@@ -2590,7 +2386,7 @@ function openLightbox(batchItems, startIndex) {
             _setLightboxTitle(newGameName);
             const _editAdditionalInfo = newAdditionalInfo || '';
             imageHeaderSubtitle.textContent = _editAdditionalInfo;
-            imageHeaderSubtitle.style.display = (_editAdditionalInfo && !_compareTargetItem) ? '' : 'none';
+            imageHeaderSubtitle.style.display = (_editAdditionalInfo && !lightboxState.compareTargetItem) ? '' : 'none';
             try {
                 await updateImageHdrType(item.id, newHdrType);
                 if (item.batchId) await updateBatchGameName(item.batchId, newGameName);
@@ -2606,14 +2402,14 @@ function openLightbox(batchItems, startIndex) {
             if (!confirm(`Delete "${item.name}"?`)) return;
             try {
                 await deleteImageFile(item.id);
-                lightboxPixelBuffers.delete(item.id);
-                lightboxBatch.splice(lightboxIndex, 1);
-                if (lightboxBatch.length === 0) {
+                lightboxState.pixelBuffers.delete(item.id);
+                lightboxState.batch.splice(lightboxState.index, 1);
+                if (lightboxState.batch.length === 0) {
                     closeLightbox();
                     await refreshGallery();
                     return;
                 }
-                lightboxIndex = Math.min(lightboxIndex, lightboxBatch.length - 1);
+                lightboxState.index = Math.min(lightboxState.index, lightboxState.batch.length - 1);
                 rebuildFilmstrip();
                 renderLightboxImage();
                 await refreshGallery();
@@ -2633,10 +2429,10 @@ function openLightbox(batchItems, startIndex) {
                 nitTooltip.style.display = 'none';
             }
             // Close full SDR view if active — the two modes are mutually exclusive
-            if (lightboxSdrToggleActive) {
-                const { fullUrl } = lightboxBlobUrls.get(item.id);
+            if (lightboxState.sdrToggleActive) {
+                const { fullUrl } = lightboxState.blobUrls.get(item.id);
                 imgEl.src = fullUrl;
-                lightboxSdrToggleActive = false;
+                lightboxState.sdrToggleActive = false;
                 sdrToggleBtn.classList.remove('sdr-active');
                 sdrToggleBtn.querySelectorAll('.sdr-pill-seg').forEach(seg => seg.classList.toggle('sdr-pill-seg--active', seg.dataset.seg === 'hdr'));
             }
@@ -2645,7 +2441,7 @@ function openLightbox(batchItems, startIndex) {
             if (existingSlider) {
                 if (existingSlider._cleanup) existingSlider._cleanup();
                 existingSlider.remove();
-                lightboxSdrActive = false;
+                lightboxState.sdrActive = false;
                 compareBtn.classList.remove('button-active');
                 compareBtn.innerHTML = _compareBtnIconHTML();
                 // Restore analysis overlay and nit tooltip
@@ -2657,16 +2453,16 @@ function openLightbox(batchItems, startIndex) {
                 _syncCompareDisplay();
                 return;
             }
-            const { sdrUrl } = lightboxBlobUrls.get(item.id);
+            const { sdrUrl } = lightboxState.blobUrls.get(item.id);
             // Slider layout is fixed by identity — item1 (this lightbox's own item)
             // is always the left/overlay image, item2 (the compare target) is
             // always the right/base image, matching the ?compare=id1,id2 URL order.
-            // This must NOT depend on lightboxCompareImageActive, which only tracks
+            // This must NOT depend on lightboxState.compareImageActive, which only tracks
             // which image is currently shown as the full main image (via the
             // separate swap/"D" button) — using it here was flipping the slider's
             // left/right sides depending on unrelated toggle state.
-            const selectedImage = _compareTargetItem || item; // base (right side)
-            const otherImage = _compareTargetItem ? item : null; // overlay (left side)
+            const selectedImage = lightboxState.compareTargetItem || item; // base (right side)
+            const otherImage = lightboxState.compareTargetItem ? item : null; // overlay (left side)
             const overlayUrl = otherImage ? otherImage.hdrUrl : sdrUrl;
             if (overlayUrl) {
                 const slider = document.createElement('div');
@@ -2855,7 +2651,7 @@ function openLightbox(batchItems, startIndex) {
                 // If already cached, onload won't fire
                 if (overlayImg.complete && overlayImg.naturalWidth > 0) activateSlider();
 
-                lightboxSdrActive = true;
+                lightboxState.sdrActive = true;
                 compareBtn.classList.add('button-active');
                 updateAllDetailButtons(globalDetailsEnabled);
                 // Keep the analysis overlay visible above the compare slider; only suppress the hover tooltip.
@@ -2867,12 +2663,12 @@ function openLightbox(batchItems, startIndex) {
         };
 
         // Single source of truth for compare-mode display: sets the main image
-        // AND the pill highlight together from lightboxCompareImageActive. Call
+        // AND the pill highlight together from lightboxState.compareImageActive. Call
         // this any time the slider closes or compare mode needs re-syncing, so
         // the image and the pill can never drift out of sync with each other.
         function _syncCompareDisplay() {
-            if (!_compareTargetItem) return;
-            const activeItem = lightboxCompareImageActive ? _compareTargetItem : item;
+            if (!lightboxState.compareTargetItem) return;
+            const activeItem = lightboxState.compareImageActive ? lightboxState.compareTargetItem : item;
             imgEl.src = activeItem.hdrUrl;
             currentVisibleImage = activeItem.id;
 
@@ -2885,7 +2681,7 @@ function openLightbox(batchItems, startIndex) {
                 lbPixelBuffer = null;
                 if (lbSdrMode) {
                     _startSdrPixelDecode(activeItem);
-                    lightboxSdrPixelBuffers.get(activeItem.id)?.then(buf => {
+                    lightboxState.sdrPixelBuffers.get(activeItem.id)?.then(buf => {
                         lbPixelBuffer = buf;
                         if (lbMouseInside && globalDetailsEnabled && buf) {
                             const { imgX, imgY } = cursorToPixel(lastCursorX, lastCursorY, buf);
@@ -2898,7 +2694,7 @@ function openLightbox(batchItems, startIndex) {
                     });
                 } else {
                     _startPixelDecode(activeItem);
-                    lightboxPixelBuffers.get(activeItem.id)?.then(buf => {
+                    lightboxState.pixelBuffers.get(activeItem.id)?.then(buf => {
                         lbPixelBuffer = buf;
                         if (lbMouseInside && globalDetailsEnabled && buf) {
                             const { imgX, imgY } = cursorToPixel(lastCursorX, lastCursorY, buf);
@@ -2917,13 +2713,13 @@ function openLightbox(batchItems, startIndex) {
 
         // Helper: update pill toggle visual state for SDR/HDR or compare mode
         function _setSdrPill(sdrActive) {
-            if (_compareTargetItem) {
+            if (lightboxState.compareTargetItem) {
                 // '.sdr-active' slides the pill highlight to the LEFT (image1) segment;
                 // its absence slides it to the RIGHT (image2) segment — so this must be
-                // the inverse of lightboxCompareImageActive (true = image2 showing).
-                sdrToggleBtn.classList.toggle('sdr-active', !lightboxCompareImageActive);
+                // the inverse of lightboxState.compareImageActive (true = image2 showing).
+                sdrToggleBtn.classList.toggle('sdr-active', !lightboxState.compareImageActive);
                 sdrToggleBtn.querySelectorAll('.sdr-pill-seg').forEach(seg => {
-                    seg.classList.toggle('sdr-pill-seg--active', seg.dataset.seg === (lightboxCompareImageActive ? 'image2' : 'image1'));
+                    seg.classList.toggle('sdr-pill-seg--active', seg.dataset.seg === (lightboxState.compareImageActive ? 'image2' : 'image1'));
                 });
             } else {
                 sdrToggleBtn.classList.toggle('sdr-active', sdrActive);
@@ -2939,7 +2735,7 @@ function openLightbox(batchItems, startIndex) {
             if (existingSlider) {
                 if (existingSlider._cleanup) existingSlider._cleanup();
                 existingSlider.remove();
-                lightboxSdrActive = false;
+                lightboxState.sdrActive = false;
                 compareBtn.classList.remove('button-active');
                 compareBtn.innerHTML = _compareBtnIconHTML();
                 // Restore analysis overlay visibility
@@ -2952,12 +2748,12 @@ function openLightbox(batchItems, startIndex) {
                 return;
             }
 
-            if (_compareTargetItem) {
+            if (lightboxState.compareTargetItem) {
                 // Swap between compared images when ?compare= is active.
-                lightboxCompareImageActive = !lightboxCompareImageActive;
+                lightboxState.compareImageActive = !lightboxState.compareImageActive;
                 _syncCompareDisplay();
                 if (globalDetailsEnabled) {
-                    const activeItem = lightboxCompareImageActive ? _compareTargetItem : item;
+                    const activeItem = lightboxState.compareImageActive ? lightboxState.compareTargetItem : item;
                     _startPixelDecode(activeItem);
                     showDetailsForImage(activeItem.id);
                     const imgElActive = document.querySelector('.lightbox-image');
@@ -2968,11 +2764,11 @@ function openLightbox(batchItems, startIndex) {
                 return;
             }
 
-            if (lightboxSdrToggleActive) {
+            if (lightboxState.sdrToggleActive) {
                 // ── Switch back to HDR ──────────────────────────────────────
-                const { fullUrl } = lightboxBlobUrls.get(item.id);
+                const { fullUrl } = lightboxState.blobUrls.get(item.id);
                 imgEl.src = fullUrl;
-                lightboxSdrToggleActive = false;
+                lightboxState.sdrToggleActive = false;
                 lbSdrMode = false;
                 lbPixelBuffer = null;
                 _setSdrPill(false);
@@ -2984,7 +2780,7 @@ function openLightbox(batchItems, startIndex) {
                     showDetailsForImage(item.id);
                     // Re-prime the HDR pixel buffer
                     _startPixelDecode(item);
-                    lightboxPixelBuffers.get(item.id)?.then(buf => {
+                    lightboxState.pixelBuffers.get(item.id)?.then(buf => {
                         lbPixelBuffer = buf;
                     });
                 } else {
@@ -2994,10 +2790,10 @@ function openLightbox(batchItems, startIndex) {
                 return;
             }
 
-            const { sdrUrl } = lightboxBlobUrls.get(item.id);
+            const { sdrUrl } = lightboxState.blobUrls.get(item.id);
             if (sdrUrl) {
                 imgEl.src = sdrUrl;
-                lightboxSdrToggleActive = true;
+                lightboxState.sdrToggleActive = true;
                 lbSdrMode = true;
                 lbPixelBuffer = null;
                 _setSdrPill(true);
@@ -3009,7 +2805,7 @@ function openLightbox(batchItems, startIndex) {
                     if (existing) existing.remove();
                     _showSdrMetadataOverlay(item, imageWrapper);
                     // Wire up SDR pixel buffer for nit tooltip
-                    lightboxSdrPixelBuffers.get(item.id)?.then(buf => {
+                    lightboxState.sdrPixelBuffers.get(item.id)?.then(buf => {
                         lbPixelBuffer = buf;
                         // If cursor is already over image, show nit tooltip immediately
                         if (lbMouseInside && globalDetailsEnabled && buf) {
@@ -3036,13 +2832,13 @@ function openLightbox(batchItems, startIndex) {
     // ── Filmstrip builder ──
     function rebuildFilmstrip() {
         filmstrip.innerHTML = '';
-        if (lightboxBatch.length <= 1) return;
-        lightboxBatch.forEach((item, idx) => {
-            const { url } = lightboxBlobUrls.get(item.id);
+        if (lightboxState.batch.length <= 1) return;
+        lightboxState.batch.forEach((item, idx) => {
+            const { url } = lightboxState.blobUrls.get(item.id);
             const isSpoiler = item.spoiler && localStorage.getItem(`spoiler-revealed:${item.id}`) !== '1';
 
             const wrapper = document.createElement('div');
-            wrapper.className = 'lightbox-filmstrip-item' + (idx === lightboxIndex ? ' lightbox-filmstrip-thumb-active' : '');
+            wrapper.className = 'lightbox-filmstrip-item' + (idx === lightboxState.index ? ' lightbox-filmstrip-thumb-active' : '');
 
             const thumb = document.createElement('img');
             thumb.src = url;
@@ -3066,7 +2862,7 @@ function openLightbox(batchItems, startIndex) {
             wrapper.addEventListener('click', (e) => {
                 e.stopPropagation();
                 if (Math.abs(e.clientX - _thumbMousedownX) > 4 || Math.abs(e.clientY - _thumbMousedownY) > 4) return;
-                lightboxIndex = idx;
+                lightboxState.index = idx;
                 renderLightboxImage();
             });
             filmstrip.appendChild(wrapper);
@@ -3079,13 +2875,11 @@ function openLightbox(batchItems, startIndex) {
         const _activeThumb = filmstrip.querySelector('.lightbox-filmstrip-thumb-active');
         if (_activeThumb) _activeThumb.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'instant' });
     });
-    _lightboxRender = renderLightboxImage;
+    lightboxState.render = renderLightboxImage;
     // Defer the first render by one rAF so the browser paints the overlay shell
     // immediately — the image load + decode then starts on the next frame rather
     // than blocking the initial open.
-    console.log(`[lightbox] overlay built, queuing rAF  +${(performance.now()-_lbT0).toFixed(1)}ms`);
     requestAnimationFrame(() => {
-        console.log(`[lightbox] rAF fired → renderLightboxImage()  +${(performance.now()-_lbT0).toFixed(1)}ms`);
         renderLightboxImage();
     });
 
@@ -3095,9 +2889,240 @@ function openLightbox(batchItems, startIndex) {
     overlay._cleanupResize  = _onLightboxResize;
 }
 
-let _lightboxRender = null; // set by openLightbox, called by navigateLightbox
-let _arrowThrottleLast  = -Infinity; // timestamp of last throttled arrow render
-let _arrowThrottleTimer = null;      // trailing-edge timer handle
+// Opens the lightbox for a batch of images starting at startIndex. This
+// function only creates the static DOM shell (overlay, image area, header,
+// toolbar, nav buttons) and initializes lightboxState; all interactive
+// behavior is delegated to the _setup* functions above, called in this order:
+//   1. _setupHdrInfoBar        — "no HDR signal" bar + tooltip
+//   2. _setupToolbarButtons    — Analysis/Compare/SDR-toggle/Edit/Delete buttons
+//   3. _setupOverlayDismiss    — click-outside-to-close
+//   4. _setupImageInteraction  — zoom/pan, touch gestures, resize, and the
+//                                 render/navigation function (owns the compare
+//                                 slider and the edit/delete/compare/SDR-toggle
+//                                 click wiring)
+// See closeLightbox() for the corresponding teardown — any _setup* function
+// that registers a window/document-level listener must have its cleanup
+// wired there too.
+function openLightbox(batchItems, startIndex) {
+    if (lightboxState.open) closeLightbox();
+
+    const _lbT0 = performance.now();
+    lightboxState.openTime = _lbT0;
+
+    lightboxState.open = true;
+    lightboxState.batch = batchItems;
+    lightboxState.index = startIndex;
+    lightboxState.sdrActive = false;
+    lightboxState.compareImageActive = false;
+
+    // Create a DOM-connected decode pool sized to the full batch.
+    // Each image that gets decoded gets its own permanent <img> slot so the browser
+    // can never evict its bitmap mid-session. Slots are added lazily by _poolPrefetch.
+    lightboxState.decodePool = document.createElement('div');
+    lightboxState.decodePool.style.cssText = 'position:fixed;width:1px;height:1px;overflow:hidden;opacity:0;pointer-events:none;z-index:-1;';
+    lightboxState.poolSlots.clear();
+    _prefetchedImages.clear();
+    document.body.appendChild(lightboxState.decodePool);
+
+    // Pre-create blob URLs for all images in the batch — reused on every navigation, no re-creation
+    lightboxState.blobUrls = new Map();
+    lightboxState.batch.forEach(item => {
+        // Use Cloudinary URLs directly — no blob URL creation needed
+        const fullUrl    = item.hdrUrl;
+        const displayUrl = item.thumbUrl || item.hdrUrl;
+        const sdrUrl     = item.sdrUrl   || null;
+        lightboxState.blobUrls.set(item.id, { url: displayUrl, fullUrl, blob: null, sdrUrl });
+    });
+
+    // Prefetch SDR images for the opening item and its neighbours so that
+    // clicking the SDR slider / toggle shows the image instantly.
+    _sdrPreloadCache.clear();
+    _prefetchSdrImages(startIndex);
+
+    // Eagerly decode the entire batch into the DOM pool.    // At ~1MB per AVIF image this is cheap on the network; decoded bitmaps are held
+    // by their pool slots and never evicted mid-session.
+    // Priority: opened image first, then outward alternating, then the rest.
+    const _eagerOrder = [startIndex];
+    for (let d = 1; d < lightboxState.batch.length; d++) {
+        if (startIndex + d < lightboxState.batch.length) _eagerOrder.push(startIndex + d);
+        if (startIndex - d >= 0)                   _eagerOrder.push(startIndex - d);
+    }
+    _eagerOrder.forEach((i, slot) => {
+        const entry = lightboxState.blobUrls.get(lightboxState.batch[i]?.id);
+        if (!entry?.fullUrl) return;
+        // Stagger by 60ms per slot — current image gets a head start, rest trickle in
+        // without saturating the codec thread or competing with the first paint.
+        setTimeout(() => {
+            const poolImg = _poolPrefetch(entry.fullUrl);
+            if (!poolImg || _decodePromises.has(entry.fullUrl)) return;
+            const _pt = performance.now();
+            const promise = poolImg.decode().then(() => {
+            }).catch(() => {});
+            _decodePromises.set(entry.fullUrl, promise);
+        }, slot * 60);
+    });
+
+    // Build overlay
+    const overlay = document.createElement('div');
+    overlay.id = 'lightbox-overlay';
+    overlay.className = 'lightbox-overlay';
+
+    // ── Main image area ──
+    const imageArea = document.createElement('div');
+    imageArea.className = 'lightbox-image-area';
+    overlay.appendChild(imageArea);
+
+    // Image wrapper (hosts zoom + nit-hunt + comparison slider + metadata overlay)
+    const imageWrapper = document.createElement('div');
+    imageWrapper.className = 'lightbox-image-wrapper';
+    imageArea.appendChild(imageWrapper);
+
+    // ── Image header overlay (tags + title above image) ──
+    const imageHeader = document.createElement('div');
+    imageHeader.className = 'lightbox-image-header';
+
+    const imageHeaderTags = document.createElement('div');
+    imageHeaderTags.className = 'lightbox-image-header-tags';
+
+    const imageHeaderTitle = document.createElement('div');
+    imageHeaderTitle.className = 'lightbox-image-header-title';
+
+    const imageHeaderSubtitle = document.createElement('div');
+    imageHeaderSubtitle.className = 'lightbox-image-header-subtitle';
+    const _initAdditionalInfo = lightboxState.batch[startIndex].additionalInfo || '';
+    imageHeaderSubtitle.textContent = _initAdditionalInfo;
+    imageHeaderSubtitle.style.display = (_initAdditionalInfo && !lightboxState.compareTargetItem) ? '' : 'none';
+
+    const imageHeaderTitleWrap = document.createElement('div');
+    imageHeaderTitleWrap.className = 'lightbox-image-header-title-wrap';
+    imageHeaderTitleWrap.appendChild(imageHeaderTitle);
+    imageHeaderTitleWrap.appendChild(imageHeaderSubtitle);
+
+    imageHeader.appendChild(imageHeaderTags);
+    imageHeader.appendChild(imageHeaderTitleWrap);
+    const imageHeaderRight = document.createElement('div');
+    imageHeader.appendChild(imageHeaderRight);
+    imageWrapper.appendChild(imageHeader);
+
+    const imgEl = document.createElement('img');
+    imgEl.className = 'lightbox-image';
+    const imgContainer = document.createElement('div');
+    imgContainer.className = 'lightbox-image-container';
+    imgContainer.appendChild(imgEl);
+    imageWrapper.appendChild(imgContainer);
+
+    // ── Toolbar ──
+    const toolbar = document.createElement('div');
+    toolbar.className = 'lightbox-toolbar';
+    overlay.appendChild(toolbar);
+
+    // Inner wrapper — constrains buttons to the same width as the image area
+    const toolbarInner = document.createElement('div');
+    toolbarInner.className = 'lightbox-toolbar-inner';
+    toolbar.appendChild(toolbarInner);
+
+    // Left side: view/analysis buttons
+    const toolbarLeft = document.createElement('div');
+    toolbarLeft.className = 'lightbox-toolbar-left';
+    toolbarInner.appendChild(toolbarLeft);
+
+    // Right side: edit/manage buttons
+    const toolbarRight = document.createElement('div');
+    toolbarRight.className = 'lightbox-toolbar-right';
+    toolbarInner.appendChild(toolbarRight);
+
+    // ── Copy Link button (right side) ──
+    const copyLinkBtn = document.createElement('button');
+    copyLinkBtn.className = 'button-secondary lightbox-copy-link-btn';
+    copyLinkBtn.title = 'Copy link';
+    copyLinkBtn.dataset.tooltip = 'Copy Link';
+    copyLinkBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg><span class="btn-label"> Copy Link</span>';
+    copyLinkBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const item = lightboxState.batch[lightboxState.index];
+        if (!item) return;
+
+        const url = new URL(location.href);
+        url.search = '';
+
+        if (lightboxState.compareTargetItem) {
+            url.searchParams.set('compare', `${item.id},${lightboxState.compareTargetItem.id}`);
+        } else {
+            url.searchParams.set('img', item.id);
+        }
+
+        if (gameSearchQuery.trim()) {
+            url.searchParams.set('game', gameSearchQuery.trim());
+        } else {
+            url.searchParams.delete('game');
+        }
+
+        const copyText = url.toString();
+
+        navigator.clipboard.writeText(copyText).then(() => {
+            copyLinkBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg><span class="btn-label"> Copied!</span>';
+            copyLinkBtn.classList.add('lightbox-copy-link-btn--copied');
+            setTimeout(() => {
+                copyLinkBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg><span class="btn-label"> Copy Link</span>';
+                copyLinkBtn.classList.remove('lightbox-copy-link-btn--copied');
+            }, 2000);
+        }).catch(() => {
+            const ta = document.createElement('textarea');
+            ta.value = copyText;
+            ta.style.position = 'fixed'; ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            ta.remove();
+        });
+    });
+    toolbarRight.appendChild(copyLinkBtn);
+
+    // ── Filmstrip ──
+    const filmstrip = _setupFilmstrip(overlay);
+
+    // ── Nav arrows ──
+    const prevBtn = document.createElement('button');
+    prevBtn.className = 'lightbox-nav lightbox-nav-prev';
+    prevBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>';
+    prevBtn.addEventListener('click', () => navigateLightbox(-1));
+    overlay.appendChild(prevBtn);
+
+    const nextBtn = document.createElement('button');
+    nextBtn.className = 'lightbox-nav lightbox-nav-next';
+    nextBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>';
+    nextBtn.addEventListener('click', () => navigateLightbox(1));
+    overlay.appendChild(nextBtn);
+
+    _setupOverlayDismiss(overlay, imageArea, filmstrip, toolbar, toolbarInner, toolbarLeft, toolbarRight, prevBtn, nextBtn);
+
+    // ── Close button ──
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'lightbox-close';
+    closeBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+    closeBtn.addEventListener('click', closeLightbox);
+    overlay.appendChild(closeBtn);
+
+    document.body.appendChild(overlay);
+    document.body.style.overflow = 'hidden';
+    document.documentElement.style.overflow = 'hidden';
+
+    _setupHdrInfoBar(overlay);
+
+    // Trigger fade-in only once the first image is decoded — so image and overlay fade in together
+    const firstEntry = lightboxState.blobUrls.get(lightboxState.batch[startIndex].id);
+    const preloader = new Image();
+    preloader.src = firstEntry.fullUrl;
+    const triggerFade = () => requestAnimationFrame(() => { overlay.style.opacity = '1'; });
+    preloader.decode().then(triggerFade).catch(triggerFade); // catch: fade in anyway if decode fails
+
+    // ── LEFT side: Analysis Tool, SDR Slider, SDR Toggle, Save ──
+    // ── RIGHT side: Edit, Copy Link | separator | Delete, Delete All ──
+    const { detailsBtn, compareBtn, sdrToggleBtn, editBtn, deleteBtn, sep2 } =
+        _setupToolbarButtons(toolbarLeft, toolbarRight, copyLinkBtn);
+
+    _setupImageInteraction(overlay, imageWrapper, imgContainer, imgEl, imageArea, filmstrip, imageHeaderRight, imageHeaderSubtitle, imageHeaderTags, imageHeaderTitle, prevBtn, nextBtn, toolbar, compareBtn, sdrToggleBtn, editBtn, deleteBtn, sep2);
+}
 
 // Keyed by sdrUrl — holds hidden Image objects to keep SDR images in the browser cache.
 const _sdrPreloadCache = new Map();
@@ -3105,9 +3130,9 @@ const _sdrPreloadCache = new Map();
 // Preload the SDR image for the item at `index` and its immediate neighbours.
 function _prefetchSdrImages(index) {
     for (const i of [index, index - 1, index + 1]) {
-        const item = lightboxBatch[i];
+        const item = lightboxState.batch[i];
         if (!item) continue;
-        const entry = lightboxBlobUrls.get(item.id);
+        const entry = lightboxState.blobUrls.get(item.id);
         const url   = entry?.sdrUrl;
         if (!url || _sdrPreloadCache.has(url)) continue;
         const img = new Image();
@@ -3117,13 +3142,22 @@ function _prefetchSdrImages(index) {
 }
 
 function navigateLightbox(direction) {
-    const newIndex = lightboxIndex + direction;
-    if (newIndex < 0 || newIndex >= lightboxBatch.length) return;
-    lightboxIndex = newIndex;
+    const newIndex = lightboxState.index + direction;
+    if (newIndex < 0 || newIndex >= lightboxState.batch.length) return;
+    lightboxState.index = newIndex;
     _prefetchSdrImages(newIndex);
-    if (_lightboxRender) _lightboxRender();
+    if (lightboxState.render) lightboxState.render();
 }
 
+// Tears down the lightbox: syncs the URL (removes ?img=/?compare=, restores
+// ?game= if a filter is active), removes the two window/document-level
+// listeners registered in _setupImageInteraction (mouseup via
+// overlay._cleanupMouseUp, resize via overlay._cleanupResize — these are the
+// only two that outlive the overlay's removal, since everything else was
+// attached directly to the overlay/its children and gets garbage-collected
+// with it), fades out and removes the overlay DOM, and resets lightboxState.
+// If a future _setup* function adds its own window/document-level listener,
+// its cleanup needs to be added here too, following the same pattern.
 function closeLightbox() {
     const url = new URL(window.location);
     if (url.searchParams.has('compare')) {
@@ -3137,8 +3171,8 @@ function closeLightbox() {
     }
     history.pushState({}, '', url);
 
-    if (_compareTargetItem) {
-        _compareTargetItem = null;
+    if (lightboxState.compareTargetItem) {
+        lightboxState.compareTargetItem = null;
     }
     const overlay = document.getElementById('lightbox-overlay');
     if (overlay) {
@@ -3151,29 +3185,29 @@ function closeLightbox() {
     }
     document.body.style.overflow = '';
     document.documentElement.style.overflow = '';
-    lightboxOpen = false;
+    lightboxState.open = false;
     // Remove the ?img= param and restore ?game= if a filter is active
     _syncGameUrl(gameSearchQuery.trim());
-    lightboxBatch = [];
-    lightboxIndex = 0;
-    lightboxSdrToggleActive = false;
-    lightboxCompareImageActive = false;
-    lightboxSdrPixelBuffers.clear();
-    _lightboxRender = null;
-    _lightboxResetZoomIdleTimer = null;
+    lightboxState.batch = [];
+    lightboxState.index = 0;
+    lightboxState.sdrToggleActive = false;
+    lightboxState.compareImageActive = false;
+    lightboxState.sdrPixelBuffers.clear();
+    lightboxState.render = null;
+    lightboxState.resetZoomIdleTimer = null;
     _sdrPreloadCache.clear();
-    _arrowThrottleLast  = -Infinity;
-    clearTimeout(_arrowThrottleTimer);
-    _arrowThrottleTimer = null;
-    if (_lightboxHdrInfoBarMq) {
-        if (typeof _lightboxHdrInfoBarMq.removeEventListener === 'function') {
-            _lightboxHdrInfoBarMq.removeEventListener('change', _updateLightboxHdrInfoBar);
-        } else if (typeof _lightboxHdrInfoBarMq.removeListener === 'function') {
-            _lightboxHdrInfoBarMq.removeListener(_updateLightboxHdrInfoBar);
+    lightboxState.arrowThrottleLast  = -Infinity;
+    clearTimeout(lightboxState.arrowThrottleTimer);
+    lightboxState.arrowThrottleTimer = null;
+    if (lightboxState.hdrInfoBarMq) {
+        if (typeof lightboxState.hdrInfoBarMq.removeEventListener === 'function') {
+            lightboxState.hdrInfoBarMq.removeEventListener('change', _updateLightboxHdrInfoBar);
+        } else if (typeof lightboxState.hdrInfoBarMq.removeListener === 'function') {
+            lightboxState.hdrInfoBarMq.removeListener(_updateLightboxHdrInfoBar);
         }
     }
-    _lightboxHdrInfoBarMq = null;
-    _lightboxHdrInfoBar = null;
+    lightboxState.hdrInfoBarMq = null;
+    lightboxState.hdrInfoBar = null;
     globalDetailsEnabled = false;
     nitTooltip.style.display = 'none';
     zoomTooltip.style.display = 'none';
@@ -3181,8 +3215,8 @@ function closeLightbox() {
     imageWrappers.clear();
     currentVisibleImage = null;
     _prefetchedImages.clear();
-    _lbPoolSlots.clear();
-    if (_lbDecodePool) { _lbDecodePool.remove(); _lbDecodePool = null; }
+    lightboxState.poolSlots.clear();
+    if (lightboxState.decodePool) { lightboxState.decodePool.remove(); lightboxState.decodePool = null; }
 }
 
 // ─── Utilities ───────────────────────────────────────────────────────────────
@@ -3379,7 +3413,7 @@ function _showSdrMetadataOverlay(item, imageWrapper) {
     const imgContainer = imageWrapper.querySelector('.lightbox-image-container') || imageWrapper;
     imgContainer.appendChild(overlay);
     // Fetch SDR file size via HEAD request (non-blocking)
-    const sdrUrl = lightboxBlobUrls.get(item.id)?.sdrUrl;
+    const sdrUrl = lightboxState.blobUrls.get(item.id)?.sdrUrl;
     if (sdrUrl) {
         fetch(sdrUrl, { method: 'HEAD' }).then(r => {
             const sizePlaceholder = document.getElementById(SIZE_PLACEHOLDER_ID);
@@ -3402,7 +3436,7 @@ function _showSdrMetadataOverlay(item, imageWrapper) {
             imoRow('Min', `${minLuminance.toFixed(2)} cd/m²`);
     } else {
         _startSdrPixelDecode(item);
-        lightboxSdrPixelBuffers.get(item.id)?.then(buf => {
+        lightboxState.sdrPixelBuffers.get(item.id)?.then(buf => {
             const placeholder = document.getElementById(LUMA_PLACEHOLDER_ID);
             if (!placeholder) return;
             if (!buf) {
@@ -3435,7 +3469,6 @@ function _showSdrMetadataOverlay(item, imageWrapper) {
 }
 
 function showMetadataOverlay(filename, metadata, imageWrapper) {
-    console.log(`[imo] showMetadataOverlay entered, imageWrapperInDom=${document.body.contains(imageWrapper)}`);
     const existing = imageWrapper.querySelector('.image-meta-overlay');
     if (existing) existing.remove();
 
@@ -3501,9 +3534,7 @@ function showMetadataOverlay(filename, metadata, imageWrapper) {
         </div>`;
 
     const imgContainer = imageWrapper.querySelector('.lightbox-image-container') || imageWrapper;
-    console.log(`[imo] appending overlay, imgContainerFound=${!!imgContainer}, usingFallback=${!imageWrapper.querySelector('.lightbox-image-container')}`);
     imgContainer.appendChild(overlay);
-    console.log(`[imo] overlay appended, overlayInDom=${document.body.contains(overlay)}`);
     _initImoPanel(overlay, imageWrapper);
 }
 
@@ -3511,7 +3542,6 @@ function showMetadataOverlay(filename, metadata, imageWrapper) {
 // Called by both showMetadataOverlay and _showSdrMetadataOverlay after the
 // overlay element has been appended to the DOM.
 function _initImoPanel(overlay, imageWrapper) {
-    console.log(`[imo] _initImoPanel called, overlayInDom=${document.body.contains(overlay)}`);
     const panel = overlay.querySelector('.imo-panel');
     if (!panel) {
         console.warn('[imo] _initImoPanel: .imo-panel not found inside overlay — panel will not render');
@@ -3901,242 +3931,202 @@ function _buildHdrDropdown(wrapEl, initialValue) {
     return { getValue: () => selected };
 }
 
-// ─── Import Modal ─────────────────────────────────────────────────────────────
-
-function showImportModal(fileCount, files = []) {
+// ─── Modal Helper ───────────────────────────────────────────────────────────
+// Shared overlay/modal lifecycle: scroll-lock while open, dismiss on Escape,
+// dismiss on outside click (tracked via mousedown so drag-selecting text
+// inside the modal and releasing outside it doesn't close it), and cleanup.
+// `setup(modal)` runs right after the modal is in the DOM — wire up widgets
+// there (game search, dropdowns, checkbox defaults) and return a `collect()`
+// function that reads the current field values; it's called when the submit
+// button is clicked and its return value becomes the resolved value.
+// Cancel / Escape / outside-click all resolve with `null`.
+function createModal({ bodyHTML, setup, submitSelector = '.modal-import', cancelSelector = '.modal-cancel', focusSelector = '.game-search-input' }) {
     return new Promise((resolve) => {
         const overlay = document.createElement('div');
         overlay.className = 'modal-overlay';
 
         const modal = document.createElement('div');
         modal.className = 'modal';
-
-        const fileListItems = files.map(f => `<li class="modal-file-list-item">
-            <svg class="modal-file-icon" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
-            <span class="modal-file-name">${f.name}</span>
-        </li>`).join('');
-
-        modal.innerHTML = `
-            <div class="modal-header">
-                <span class="modal-title">${fileCount} image${fileCount === 1 ? '' : 's'} ready to import</span>
-                <span class="modal-subtitle">Set game name and HDR type for this batch</span>
-            </div>
-            <div class="modal-body">
-                ${fileListItems ? `<ul class="modal-file-list">${fileListItems}</ul>` : ''}
-                <div class="modal-section-label">Game Name</div>
-                <div class="game-search-wrap">
-                    <div class="game-search-row">
-                        <svg class="game-search-icon" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-                        <input class="game-search-input" type="text" placeholder="Search game…" autocomplete="off" />
-                    </div>
-                    <div class="game-search-results"></div>
-                </div>
-                <div class="modal-section-label modal-section-label-hdr">HDR Type</div>
-                <div class="hdr-custom-select-wrap" id="importHdrWrap">
-                    <div class="game-search-row modal-select-row hdr-custom-trigger">
-                        <svg class="game-search-icon" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
-                        <span class="hdr-custom-label">Unspecified</span>
-                        <svg class="hdr-custom-chevron" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#888" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
-                    </div>
-                    <div class="hdr-custom-dropdown"></div>
-                </div>
-                <div class="modal-section-label modal-section-label-info">Additional Info</div>
-                <div class="game-search-row">
-                    <svg class="game-search-icon" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>
-                    <input type="text" class="modal-additional-info-input" autocomplete="off" />
-                </div>
-                <label class="modal-spoiler-label">
-                    <input type="checkbox" class="modal-spoiler-checkbox" />
-                    Mark as spoiler
-                </label>
-                <label class="modal-spoiler-label modal-hidden-label">
-                    <input type="checkbox" class="modal-hidden-checkbox" />
-                    Hide from galleries &amp; search
-                </label>
-            </div>
-            <div class="modal-footer">
-                <button class="button-secondary modal-cancel">Cancel</button>
-                <button class="modal-import">Import</button>
-            </div>
-        `;
+        modal.innerHTML = bodyHTML;
 
         overlay.appendChild(modal);
         document.body.appendChild(overlay);
         document.body.style.overflow = 'hidden';
         document.documentElement.style.overflow = 'hidden';
 
-        const importBtn   = modal.querySelector('.modal-import');
-        const searchInput = modal.querySelector('.game-search-input');
-
-        let selectedGameName = null;
-        _setupGameSearch(modal, null, (name) => { selectedGameName = name; });
-
-        const hdrDropdown = _buildHdrDropdown(modal.querySelector('#importHdrWrap'), null);
-
-        modal.querySelector('.modal-cancel').onclick = () => {
+        const close = (result) => {
             document.body.style.overflow = '';
             document.documentElement.style.overflow = '';
             overlay.remove();
-            document.removeEventListener('keydown', onImportKeydown, true);
-            resolve(null);
+            document.removeEventListener('keydown', onKeydown, true);
+            resolve(result);
         };
 
-        importBtn.onclick = () => {
-            const spoiler = modal.querySelector('.modal-spoiler-checkbox').checked;
-            const hidden = modal.querySelector('.modal-hidden-checkbox').checked;
-            const additionalInfo = modal.querySelector('.modal-additional-info-input').value.trim() || null;
-            document.body.style.overflow = '';
-            document.documentElement.style.overflow = '';
-            overlay.remove();
-            document.removeEventListener('keydown', onImportKeydown, true);
-            resolve({ hdrType: hdrDropdown.getValue() ?? 'unknown', gameName: selectedGameName, spoiler, hidden, additionalInfo });
-        };
-
-        let importMousedownOnModal = false;
-        modal.addEventListener('mousedown', () => { importMousedownOnModal = true; });
-        overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) importMousedownOnModal = false; });
-        overlay.addEventListener('click', (e) => {
-            if (e.target === overlay && !importMousedownOnModal) {
-                document.body.style.overflow = '';
-                document.documentElement.style.overflow = '';
-                overlay.remove();
-                document.removeEventListener('keydown', onImportKeydown, true);
-                resolve(null);
-            }
-            importMousedownOnModal = false;
-        });
-
-        const onImportKeydown = (e) => {
+        // Escape closes the modal without leaking to whatever is behind it
+        // (e.g. the lightbox).
+        const onKeydown = (e) => {
             if (e.key === 'Escape') {
                 e.stopPropagation();
-                document.body.style.overflow = '';
-                document.documentElement.style.overflow = '';
-                overlay.remove();
-                document.removeEventListener('keydown', onImportKeydown, true);
-                resolve(null);
+                close(null);
             }
         };
-        document.addEventListener('keydown', onImportKeydown, true);
+        document.addEventListener('keydown', onKeydown, true);
 
-        // Focus search input on open
-        requestAnimationFrame(() => searchInput.focus());
+        const collect = setup ? setup(modal) : null;
+
+        const cancelBtn = modal.querySelector(cancelSelector);
+        if (cancelBtn) cancelBtn.onclick = () => close(null);
+
+        const submitBtn = modal.querySelector(submitSelector);
+        if (submitBtn) submitBtn.onclick = () => close(collect ? collect() : true);
+
+        let mousedownOnModal = false;
+        modal.addEventListener('mousedown', () => { mousedownOnModal = true; });
+        overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) mousedownOnModal = false; });
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay && !mousedownOnModal) close(null);
+            mousedownOnModal = false;
+        });
+
+        if (focusSelector) {
+            const focusEl = modal.querySelector(focusSelector);
+            if (focusEl) requestAnimationFrame(() => focusEl.focus());
+        }
+    });
+}
+
+// ─── Import Modal ─────────────────────────────────────────────────────────────
+
+function showImportModal(fileCount, files = []) {
+    const fileListItems = files.map(f => `<li class="modal-file-list-item">
+        <svg class="modal-file-icon" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+        <span class="modal-file-name">${f.name}</span>
+    </li>`).join('');
+
+    const bodyHTML = `
+        <div class="modal-header">
+            <span class="modal-title">${fileCount} image${fileCount === 1 ? '' : 's'} ready to import</span>
+            <span class="modal-subtitle">Set game name and HDR type for this batch</span>
+        </div>
+        <div class="modal-body">
+            ${fileListItems ? `<ul class="modal-file-list">${fileListItems}</ul>` : ''}
+            <div class="modal-section-label">Game Name</div>
+            <div class="game-search-wrap">
+                <div class="game-search-row">
+                    <svg class="game-search-icon" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                    <input class="game-search-input" type="text" placeholder="Search game…" autocomplete="off" />
+                </div>
+                <div class="game-search-results"></div>
+            </div>
+            <div class="modal-section-label modal-section-label-hdr">HDR Type</div>
+            <div class="hdr-custom-select-wrap" id="importHdrWrap">
+                <div class="game-search-row modal-select-row hdr-custom-trigger">
+                    <svg class="game-search-icon" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+                    <span class="hdr-custom-label">Unspecified</span>
+                    <svg class="hdr-custom-chevron" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#888" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                </div>
+                <div class="hdr-custom-dropdown"></div>
+            </div>
+            <div class="modal-section-label modal-section-label-info">Additional Info</div>
+            <div class="game-search-row">
+                <svg class="game-search-icon" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>
+                <input type="text" class="modal-additional-info-input" autocomplete="off" />
+            </div>
+            <label class="modal-spoiler-label">
+                <input type="checkbox" class="modal-spoiler-checkbox" />
+                Mark as spoiler
+            </label>
+            <label class="modal-spoiler-label modal-hidden-label">
+                <input type="checkbox" class="modal-hidden-checkbox" />
+                Hide from galleries &amp; search
+            </label>
+        </div>
+        <div class="modal-footer">
+            <button class="button-secondary modal-cancel">Cancel</button>
+            <button class="modal-import">Import</button>
+        </div>
+    `;
+
+    return createModal({
+        bodyHTML,
+        setup(modal) {
+            let selectedGameName = null;
+            _setupGameSearch(modal, null, (name) => { selectedGameName = name; });
+            const hdrDropdown = _buildHdrDropdown(modal.querySelector('#importHdrWrap'), null);
+
+            return () => ({
+                hdrType: hdrDropdown.getValue() ?? 'unknown',
+                gameName: selectedGameName,
+                spoiler: modal.querySelector('.modal-spoiler-checkbox').checked,
+                hidden: modal.querySelector('.modal-hidden-checkbox').checked,
+                additionalInfo: modal.querySelector('.modal-additional-info-input').value.trim() || null,
+            });
+        },
     });
 }
 
 // ─── Edit Modal ───────────────────────────────────────────────────────────────
 
 function showEditModal(currentHdrType, currentGameName, currentSpoiler, thumbUrl, currentAdditionalInfo, currentHidden) {
-    return new Promise((resolve) => {
-        const overlay = document.createElement('div');
-        overlay.className = 'modal-overlay';
-
-        const modal = document.createElement('div');
-        modal.className = 'modal';
-
-        modal.innerHTML = `
-            <div class="modal-header">
-                <span class="modal-title">Edit Details</span>
-                <span class="modal-subtitle">Set game name and HDR type for this batch</span>
-                ${thumbUrl ? `<img class="modal-thumb" src="${thumbUrl}" alt="Preview" />` : ''}
-            </div>
-            <div class="modal-body">
-                <div class="modal-section-label">Game Name</div>
-                <div class="game-search-wrap">
-                    <div class="game-search-row">
-                        <svg class="game-search-icon" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-                        <input class="game-search-input" type="text" placeholder="Search game…" autocomplete="off" value="${currentGameName || ''}" />
-                    </div>
-                    <div class="game-search-results"></div>
-                </div>
-                <div class="modal-section-label modal-section-label-hdr">HDR Type</div>
-                <div class="hdr-custom-select-wrap" id="editHdrWrap">
-                    <div class="game-search-row modal-select-row hdr-custom-trigger">
-                        <svg class="game-search-icon" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
-                        <span class="hdr-custom-label">Unspecified</span>
-                        <svg class="hdr-custom-chevron" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#888" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
-                    </div>
-                    <div class="hdr-custom-dropdown"></div>
-                </div>
-                <div class="modal-section-label modal-section-label-info">Additional Info</div>
+    const bodyHTML = `
+        <div class="modal-header">
+            <span class="modal-title">Edit Details</span>
+            <span class="modal-subtitle">Set game name and HDR type for this batch</span>
+            ${thumbUrl ? `<img class="modal-thumb" src="${thumbUrl}" alt="Preview" />` : ''}
+        </div>
+        <div class="modal-body">
+            <div class="modal-section-label">Game Name</div>
+            <div class="game-search-wrap">
                 <div class="game-search-row">
-                    <svg class="game-search-icon" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>
-                    <input type="text" class="modal-additional-info-input" autocomplete="off" value="${currentAdditionalInfo || ''}"/>
+                    <svg class="game-search-icon" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                    <input class="game-search-input" type="text" placeholder="Search game…" autocomplete="off" value="${currentGameName || ''}" />
                 </div>
-                <label class="modal-spoiler-label">
-                    <input type="checkbox" class="modal-spoiler-checkbox" ${currentSpoiler ? 'checked' : ''} />
-                    Mark as spoiler
-                </label>
-                <label class="modal-spoiler-label modal-hidden-label">
-                    <input type="checkbox" class="modal-hidden-checkbox" ${currentHidden ? 'checked' : ''} />
-                    Hide from galleries &amp; search
-                </label>
+                <div class="game-search-results"></div>
             </div>
-            <div class="modal-footer">
-                <button class="button-secondary modal-cancel">Cancel</button>
-                <button class="modal-import">Save</button>
+            <div class="modal-section-label modal-section-label-hdr">HDR Type</div>
+            <div class="hdr-custom-select-wrap" id="editHdrWrap">
+                <div class="game-search-row modal-select-row hdr-custom-trigger">
+                    <svg class="game-search-icon" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+                    <span class="hdr-custom-label">Unspecified</span>
+                    <svg class="hdr-custom-chevron" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#888" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                </div>
+                <div class="hdr-custom-dropdown"></div>
             </div>
-        `;
+            <div class="modal-section-label modal-section-label-info">Additional Info</div>
+            <div class="game-search-row">
+                <svg class="game-search-icon" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>
+                <input type="text" class="modal-additional-info-input" autocomplete="off" value="${currentAdditionalInfo || ''}"/>
+            </div>
+            <label class="modal-spoiler-label">
+                <input type="checkbox" class="modal-spoiler-checkbox" ${currentSpoiler ? 'checked' : ''} />
+                Mark as spoiler
+            </label>
+            <label class="modal-spoiler-label modal-hidden-label">
+                <input type="checkbox" class="modal-hidden-checkbox" ${currentHidden ? 'checked' : ''} />
+                Hide from galleries &amp; search
+            </label>
+        </div>
+        <div class="modal-footer">
+            <button class="button-secondary modal-cancel">Cancel</button>
+            <button class="modal-import">Save</button>
+        </div>
+    `;
 
-        overlay.appendChild(modal);
-        document.body.appendChild(overlay);
-        document.body.style.overflow = 'hidden';
-        document.documentElement.style.overflow = 'hidden';
+    return createModal({
+        bodyHTML,
+        setup(modal) {
+            let selectedGameName = currentGameName || null;
+            _setupGameSearch(modal, currentGameName, (name) => { selectedGameName = name; });
+            const hdrDropdown = _buildHdrDropdown(modal.querySelector('#editHdrWrap'), currentHdrType);
 
-        const saveBtn = modal.querySelector('.modal-import');
-
-        let selectedGameName = currentGameName || null;
-        _setupGameSearch(modal, currentGameName, (name) => { selectedGameName = name; });
-
-        const hdrDropdown = _buildHdrDropdown(modal.querySelector('#editHdrWrap'), currentHdrType);
-
-        // Escape closes the modal (without leaking to the lightbox behind)
-        const onModalKeydown = (e) => {
-            if (e.key === 'Escape') {
-                e.stopPropagation();
-                document.body.style.overflow = '';
-                document.documentElement.style.overflow = '';
-                overlay.remove();
-                document.removeEventListener('keydown', onModalKeydown, true);
-                resolve(null);
-            }
-        };
-        document.addEventListener('keydown', onModalKeydown, true);
-
-        modal.querySelector('.modal-cancel').onclick = () => {
-            document.body.style.overflow = '';
-            document.documentElement.style.overflow = '';
-            overlay.remove();
-            document.removeEventListener('keydown', onModalKeydown, true);
-            resolve(null);
-        };
-
-        saveBtn.onclick = () => {
-            const spoiler = modal.querySelector('.modal-spoiler-checkbox').checked;
-            const hidden = modal.querySelector('.modal-hidden-checkbox').checked;
-            const additionalInfo = modal.querySelector('.modal-additional-info-input').value.trim() || null;
-            document.body.style.overflow = '';
-            document.documentElement.style.overflow = '';
-            overlay.remove();
-            document.removeEventListener('keydown', onModalKeydown, true);
-            resolve({ hdrType: hdrDropdown.getValue() ?? 'unknown', gameName: selectedGameName, spoiler, hidden, additionalInfo });
-        };
-
-        let editMousedownOnModal = false;
-        modal.addEventListener('mousedown', () => { editMousedownOnModal = true; });
-        overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) editMousedownOnModal = false; });
-        overlay.addEventListener('click', (e) => {
-            if (e.target === overlay && !editMousedownOnModal) {
-            document.body.style.overflow = '';
-            document.documentElement.style.overflow = '';
-                overlay.remove();
-                document.removeEventListener('keydown', onModalKeydown, true);
-                resolve(null);
-            }
-            editMousedownOnModal = false;
-        });
-
-        // Focus search input
-        requestAnimationFrame(() => searchInput.focus());
+            return () => ({
+                hdrType: hdrDropdown.getValue() ?? 'unknown',
+                gameName: selectedGameName,
+                spoiler: modal.querySelector('.modal-spoiler-checkbox').checked,
+                hidden: modal.querySelector('.modal-hidden-checkbox').checked,
+                additionalInfo: modal.querySelector('.modal-additional-info-input').value.trim() || null,
+            });
+        },
     });
 }
 
@@ -4144,6 +4134,12 @@ function showEditModal(currentHdrType, currentGameName, currentSpoiler, thumbUrl
 
 // ─── Gallery Search Bar ───────────────────────────────────────────────────────
 
+// Builds (once — guarded by bar.dataset.built) the gallery's filter bar: a
+// game-name search input with a keyboard-navigable autocomplete dropdown
+// (built from all unique game names in allItems, with per-game image
+// counts), a clear button, and the list/grid2/grid3 view-toggle buttons.
+// Wires up input/keydown/focus/blur handling for the dropdown and a
+// document-level mousedown listener to close it on outside clicks.
 function buildFilterBar(allItems) {
     const bar = document.getElementById('filterBar');
     if (!bar || bar.dataset.built) return;
@@ -4418,30 +4414,29 @@ document.addEventListener('DOMContentLoaded', async () => {
 // while the OS is still compositing the window restore — by the time the first
 // paint lands the bitmap is ready.
 document.addEventListener('visibilitychange', () => {
-    if (document.hidden || !lightboxOpen) return;
+    if (document.hidden || !lightboxState.open) return;
 
     // GPU dropped all bitmaps on minimize — clear stale promises and reset pool so we re-decode fresh.
     _decodePromises.clear();
     _prefetchedImages.clear();
-    _lbPoolSlots.clear();
-    if (_lbDecodePool) _lbDecodePool.innerHTML = '';
+    lightboxState.poolSlots.clear();
+    if (lightboxState.decodePool) lightboxState.decodePool.innerHTML = '';
 
     // Build outward priority list: current first, then next/prev alternating outward
-    const indices = [lightboxIndex];
-    for (let d = 1; d < lightboxBatch.length; d++) {
-        if (lightboxIndex + d < lightboxBatch.length) indices.push(lightboxIndex + d);
-        if (lightboxIndex - d >= 0)                   indices.push(lightboxIndex - d);
+    const indices = [lightboxState.index];
+    for (let d = 1; d < lightboxState.batch.length; d++) {
+        if (lightboxState.index + d < lightboxState.batch.length) indices.push(lightboxState.index + d);
+        if (lightboxState.index - d >= 0)                   indices.push(lightboxState.index - d);
     }
 
     indices.forEach((i, slot) => {
-        const entry = lightboxBlobUrls.get(lightboxBatch[i]?.id);
+        const entry = lightboxState.blobUrls.get(lightboxState.batch[i]?.id);
         if (!entry) return;
         setTimeout(() => {
             const _t = performance.now();
             const poolImg = _poolPrefetch(entry.fullUrl);
             if (!poolImg) return;
             const promise = poolImg.decode().then(() => {
-                console.log(`[lightbox] visibility restore decode complete: "${lightboxBatch[i].name}" (slot ${slot})  +${(performance.now()-_t).toFixed(1)}ms`);
             }).catch(() => {});
             _decodePromises.set(entry.fullUrl, promise);
         }, slot * 150);
@@ -4453,7 +4448,7 @@ document.addEventListener('keydown', (e) => {
     // Ignore if typing in an input field
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
     // All shortcuts only active when lightbox is open
-    if (!lightboxOpen) return;
+    if (!lightboxState.open) return;
 
     // Escape: close lightbox
     if (e.key === 'Escape') {
@@ -4464,19 +4459,19 @@ document.addEventListener('keydown', (e) => {
 
     // Arrow navigation — throttle renders so holding an arrow key scrubs smoothly
     // through images (like Discord) rather than debouncing to the final image.
-    // _arrowThrottleLast lives outside this handler so it persists across key-repeat events.
+    // lightboxState.arrowThrottleLast lives outside this handler so it persists across key-repeat events.
     if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
         e.preventDefault();
         const direction = e.key === 'ArrowLeft' ? -1 : 1;
-        const newIndex = lightboxIndex + direction;
-        if (newIndex < 0 || newIndex >= lightboxBatch.length) return;
-        lightboxIndex = newIndex;
+        const newIndex = lightboxState.index + direction;
+        if (newIndex < 0 || newIndex >= lightboxState.batch.length) return;
+        lightboxState.index = newIndex;
 
         // Always update filmstrip highlight immediately for visual feedback
         const filmstrip = document.querySelector('.lightbox-filmstrip');
         if (filmstrip) {
             filmstrip.querySelectorAll('.lightbox-filmstrip-item').forEach((t, i) => {
-                t.classList.toggle('lightbox-filmstrip-thumb-active', i === lightboxIndex);
+                t.classList.toggle('lightbox-filmstrip-thumb-active', i === lightboxState.index);
             });
             const active = filmstrip.querySelector('.lightbox-filmstrip-thumb-active');
             if (active) active.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'instant' });
@@ -4485,18 +4480,18 @@ document.addEventListener('keydown', (e) => {
         // Throttle full renders to ~80ms — fires on the first press immediately,
         // then at most once per 80ms while held, so images flow smoothly.
         const now = performance.now();
-        const elapsed = now - _arrowThrottleLast;
-        clearTimeout(_arrowThrottleTimer);
+        const elapsed = now - lightboxState.arrowThrottleLast;
+        clearTimeout(lightboxState.arrowThrottleTimer);
         if (elapsed >= 80) {
             // Enough time has passed — render immediately
-            _arrowThrottleLast = now;
-            if (_lightboxRender) _lightboxRender();
+            lightboxState.arrowThrottleLast = now;
+            if (lightboxState.render) lightboxState.render();
         } else {
             // Too soon — schedule a trailing render for when the throttle window expires
             // so the final destination is always rendered after key-release.
-            _arrowThrottleTimer = setTimeout(() => {
-                _arrowThrottleLast = performance.now();
-                if (_lightboxRender) _lightboxRender();
+            lightboxState.arrowThrottleTimer = setTimeout(() => {
+                lightboxState.arrowThrottleLast = performance.now();
+                if (lightboxState.render) lightboxState.render();
             }, 80 - elapsed);
         }
         return;
@@ -4506,7 +4501,7 @@ document.addEventListener('keydown', (e) => {
     if (e.key === 'a' || e.key === 'A') {
         e.preventDefault();
         const hasActiveCompareSlider = !!document.querySelector('#lightbox-overlay .inline-comparison-slider');
-        if (hasActiveCompareSlider && !globalDetailsEnabled && !_compareTargetItem) return;
+        if (hasActiveCompareSlider && !globalDetailsEnabled && !lightboxState.compareTargetItem) return;
         toggleGlobalDetailsMode();
     }
 
