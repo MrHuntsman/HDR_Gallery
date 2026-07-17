@@ -63,6 +63,20 @@ async function _fetchRawgBannerImage(gameName) {
 // Renders the styled game banner into .gallery-section-header.
 // If the URL is already cached (in-memory or localStorage) it renders
 // instantly with no skeleton flash. Otherwise shows a skeleton while fetching.
+// Escapes a string for safe insertion into HTML text/attribute contexts.
+// Anything that ends up in an innerHTML template built from user- or
+// URL-controlled input (game names, search queries, etc.) must go through
+// this first.
+function _escapeHtml(str) {
+    return String(str ?? '').replace(/[&<>"']/g, (c) => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;',
+    }[c]));
+}
+
 async function _showGameBanner(gameName) {
     const sectionHeader = document.querySelector('.gallery-section-header');
     if (!sectionHeader) return;
@@ -71,12 +85,14 @@ async function _showGameBanner(gameName) {
     const cachedUrl = _rawgBannerCache.has(gameName) ? _rawgBannerCache.get(gameName) : _bannerStoreGet(gameName);
     const isInstant = cachedUrl !== undefined;
 
-    const bgStyle = (isInstant && cachedUrl) ? `style="background-image:url(${cachedUrl})"` : '';
+    // cachedUrl comes from the RAWG API, not free-form user input, but it's
+    // still external data — escape it before it goes into an attribute.
+    const bgStyle = (isInstant && cachedUrl) ? `style="background-image:url(${_escapeHtml(cachedUrl)})"` : '';
     sectionHeader.style.display = '';
     sectionHeader.innerHTML = `
         <div class="game-banner-header${isInstant ? '' : ' banner-loading'}" ${bgStyle}>
             <div class="game-banner-overlay"></div>
-            <span class="game-banner-title">${gameName}</span>
+            <span class="game-banner-title">${_escapeHtml(gameName)}</span>
             <button class="game-banner-close" aria-label="Clear search">
                 <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
             </button>
@@ -4167,7 +4183,6 @@ function buildFilterBar(allItems) {
                         type="text"
                         placeholder="Search game…"
                         autocomplete="off"
-                        value="${gameSearchQuery}"
                     />
                     <button id="gallerySearchClear" class="gallery-search-clear" style="display:${gameSearchQuery ? 'flex' : 'none'};" aria-label="Clear search">
                         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -4193,6 +4208,11 @@ function buildFilterBar(allItems) {
     const input      = bar.querySelector('#gallerySearchInput');
     const clearBtn   = bar.querySelector('#gallerySearchClear');
     const dropdown   = bar.querySelector('#gallerySearchDropdown');
+
+    // Set as a DOM property, not interpolated into the HTML template above —
+    // this is what actually closes the XSS hole, since a property assignment
+    // is never parsed as markup no matter what gameSearchQuery contains.
+    input.value = gameSearchQuery;
 
     function showSuggestions(query) {
         const q = query.trim().toLowerCase();
