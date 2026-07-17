@@ -984,6 +984,12 @@ const lightboxState = {
     // instead of the current item's own SDR render. Cleared on lightbox close.
     compareTargetItem: null,
 
+    // True while the user has clicked "Compare with..." and is picking a
+    // second image from the filmstrip. Cleared on pick, cancel, Escape, or
+    // lightbox close. Distinct from compareTargetItem: this is the *picking*
+    // step, compareTargetItem is the *result* once openCompareLightbox runs.
+    pickerMode: false,
+
     render: null,                 // set by openLightbox, called by navigateLightbox
     arrowThrottleLast: -Infinity, // timestamp of last throttled arrow render
     arrowThrottleTimer: null,     // trailing-edge timer handle
@@ -1042,6 +1048,16 @@ function _setupHdrInfoBar(overlay) {
 // Returns the filmstrip element — callers keep populating/reading it via
 // rebuildFilmstrip() and other logic that lives in openLightbox.
 function _setupFilmstrip(overlay) {
+    // In-lightbox toast — a floating status message rendered inside the overlay
+    // itself. #statusMessage (used by showStatusMessage) sits in the base page
+    // beneath the lightbox and is invisible while it's open, so anything that
+    // needs to surface a message while the lightbox is up (e.g. "can't compare
+    // an image with itself") goes through _showLightboxToast instead.
+    const toast = document.createElement('div');
+    toast.className = 'lightbox-toast';
+    overlay.appendChild(toast);
+    overlay._toast = toast;
+
     const filmstrip = document.createElement('div');
     filmstrip.className = 'lightbox-filmstrip';
     overlay.appendChild(filmstrip);
@@ -1128,6 +1144,16 @@ function _setupToolbarButtons(toolbarLeft, toolbarRight, copyLinkBtn) {
     }
     toolbarLeft.appendChild(sdrToggleBtn);
 
+    const pickCompareBtn = document.createElement('button');
+    pickCompareBtn.className = 'button-secondary js-pick-compare-btn';
+    pickCompareBtn.title = 'Compare with another image';
+    pickCompareBtn.dataset.tooltip = 'Compare with another image';
+    pickCompareBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="13" height="13" rx="2"/><path d="M9 7V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v13a2 2 0 0 1-2 2h-3"/></svg><span class="btn-label"> Compare with…</span>';
+    // Hidden when we're already in a two-image compare (compareTargetItem set) —
+    // picking a third image isn't supported, avoid a confusing double-compare state.
+    if (lightboxState.compareTargetItem) pickCompareBtn.style.display = 'none';
+    toolbarLeft.appendChild(pickCompareBtn);
+
     const sep1 = document.createElement('div');
     sep1.className = 'toolbar-separator';
     toolbarLeft.appendChild(sep1);
@@ -1151,7 +1177,7 @@ function _setupToolbarButtons(toolbarLeft, toolbarRight, copyLinkBtn) {
     deleteBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg><span class="btn-label"> Delete</span>';
     toolbarRight.appendChild(deleteBtn);
 
-    return { detailsBtn, compareBtn, sdrToggleBtn, editBtn, deleteBtn, sep2 };
+    return { detailsBtn, compareBtn, sdrToggleBtn, pickCompareBtn, editBtn, deleteBtn, sep2 };
 }
 
 // Wires up click-outside-to-close behavior on the lightbox overlay: tracks
@@ -1312,11 +1338,28 @@ async function openCompareLightbox(id1, id2) {
     } catch (err) {
         console.error('[compare] failed to load images:', err);
         showStatusMessage('Compare: failed to load one or both images', 'error');
+        _showLightboxToast('Compare: failed to load one or both images', 'error');
         return;
     }
     if (!item1 || !item2) {
         showStatusMessage('Compare: one or both image IDs were not found', 'error');
+        _showLightboxToast('Compare: one or both image IDs were not found', 'error');
         return;
+    }
+    // Close any currently-open lightbox and wait out its fade-out before opening
+    // the new one. openLightbox() also does "if open, closeLightbox()" itself,
+    // but that leaves the old overlay's fade-out setTimeout racing against the
+    // new overlay being built immediately after — for a moment two #lightbox-
+    // overlay elements exist, and any code that queries by id/class (rather
+    // than holding a direct element reference) can grab the wrong one. Closing
+    // here and awaiting the fade removes that overlap entirely.
+    if (lightboxState.open) {
+        const _existingOverlay = document.getElementById('lightbox-overlay');
+        closeLightbox();
+        if (_existingOverlay) {
+            const _duration = parseFloat(getComputedStyle(_existingOverlay).transitionDuration) * 1000 || 0;
+            await new Promise(resolve => setTimeout(resolve, _duration));
+        }
     }
     lightboxState.compareTargetItem = item2;
     openLightbox([item1], 0);
@@ -1329,10 +1372,13 @@ async function openCompareLightbox(id1, id2) {
         });
     }
     // Auto-open the slider once the toolbar exists (renderLightboxImage runs async).
+    // Guard against the lightbox having been closed again (or reopened as a
+    // different, non-compare instance) by the time this fires.
     const _tryClick = () => {
+        if (!lightboxState.open || !lightboxState.compareTargetItem) return;
         const btn = document.querySelector('.js-compare-slider-btn');
         if (btn) btn.click();
-        else if (lightboxState.open) setTimeout(_tryClick, 50);
+        else setTimeout(_tryClick, 50);
     };
     setTimeout(_tryClick, 50);
 }
@@ -1357,7 +1403,7 @@ function _checkCompareUrl() {
 // pool of mutable state (zoom transform, pan velocity, touch state, etc.) which
 // is why it's kept together here rather than split into fully independent
 // functions communicating through return values.
-function _setupImageInteraction(overlay, imageWrapper, imgContainer, imgEl, imageArea, filmstrip, imageHeaderRight, imageHeaderSubtitle, imageHeaderTags, imageHeaderTitle, prevBtn, nextBtn, toolbar, compareBtn, sdrToggleBtn, editBtn, deleteBtn, sep2) {
+function _setupImageInteraction(overlay, imageWrapper, imgContainer, imgEl, imageArea, filmstrip, imageHeaderRight, imageHeaderSubtitle, imageHeaderTags, imageHeaderTitle, prevBtn, nextBtn, toolbar, compareBtn, sdrToggleBtn, pickCompareBtn, editBtn, deleteBtn, sep2) {
 
     // Helper — updates title text and link state whenever the image changes.
     // (Needs imageHeaderTitle, created earlier in openLightbox, passed in above.)
@@ -2146,12 +2192,33 @@ function _setupImageInteraction(overlay, imageWrapper, imgContainer, imgEl, imag
     // ── Render function (called on init and navigation) ──
     async function renderLightboxImage() {
         const item = lightboxState.batch[lightboxState.index];
-        // Update the page URL so this image has a shareable link, unless the
-        // current URL is already using compare mode and should stay focused on it.
+        // Navigating (arrows, prev/next, filmstrip nav-click) implicitly cancels
+        // an armed "Compare with..." pick — only a filmstrip pick-click itself
+        // should complete it, and that path already clears pickerMode before
+        // calling openCompareLightbox, so this is a no-op in that case.
+        lightboxState.pickerMode = false;
+        const pickBtnEl = toolbar.querySelector('.js-pick-compare-btn');
+        if (pickBtnEl) {
+            pickBtnEl.classList.remove('button-active');
+            pickBtnEl.title = 'Compare with another image';
+            pickBtnEl.dataset.tooltip = pickBtnEl.title;
+        }
+        filmstrip.classList.remove('lightbox-filmstrip-picking');
+
+        // Update the page URL so this image has a shareable link. If we're in
+        // compare mode (compareTargetItem set — either from a ?compare= deep
+        // link or from just picking a second image via the filmstrip), the URL
+        // should reflect ?compare=id1,id2 instead of ?img=. This must check
+        // lightboxState.compareTargetItem itself, not merely whether ?compare=
+        // already happens to be in the current URL — otherwise picking a second
+        // image never gets its own compare URL written, since the address bar
+        // is still showing whatever ?img= was there before the pick.
         const _shareUrl = new URL(location.href);
-        if (_shareUrl.searchParams.has('compare')) {
+        if (lightboxState.compareTargetItem) {
+            _shareUrl.searchParams.set('compare', `${item.id},${lightboxState.compareTargetItem.id}`);
             _shareUrl.searchParams.delete('img');
         } else {
+            _shareUrl.searchParams.delete('compare');
             _shareUrl.searchParams.set('img', item.id);
         }
         // Preserve ?game= if a gallery filter is active
@@ -2430,6 +2497,20 @@ function _setupImageInteraction(overlay, imageWrapper, imgContainer, imgEl, imag
                 renderLightboxImage();
                 await refreshGallery();
             } catch (err) { console.error('Delete error:', err); }
+        };
+
+        // "Compare with..." — arms picker mode so the next filmstrip click opens
+        // the two-image compare lightbox instead of navigating. Click again (or
+        // Escape) to cancel without picking anything.
+        pickCompareBtn.onclick = () => {
+            lightboxState.pickerMode = !lightboxState.pickerMode;
+            pickCompareBtn.classList.toggle('button-active', lightboxState.pickerMode);
+            pickCompareBtn.title = lightboxState.pickerMode ? 'Click an image below to compare (Esc to cancel)' : 'Compare with another image';
+            pickCompareBtn.dataset.tooltip = pickCompareBtn.title;
+            filmstrip.classList.toggle('lightbox-filmstrip-picking', lightboxState.pickerMode);
+            if (lightboxState.batch.length <= 1) {
+                _showLightboxToast('No other images to compare with in this view', 'error');
+            }
         };
 
         compareBtn.onclick = (e) => {
@@ -2878,6 +2959,20 @@ function _setupImageInteraction(overlay, imageWrapper, imgContainer, imgEl, imag
             wrapper.addEventListener('click', (e) => {
                 e.stopPropagation();
                 if (Math.abs(e.clientX - _thumbMousedownX) > 4 || Math.abs(e.clientY - _thumbMousedownY) > 4) return;
+                if (lightboxState.pickerMode) {
+                    lightboxState.pickerMode = false;
+                    pickCompareBtn.classList.remove('button-active');
+                    pickCompareBtn.title = 'Compare with another image';
+                    pickCompareBtn.dataset.tooltip = pickCompareBtn.title;
+                    filmstrip.classList.remove('lightbox-filmstrip-picking');
+                    const currentItem = lightboxState.batch[lightboxState.index];
+                    if (item.id === currentItem.id) {
+                        _showLightboxToast("Can't compare an image with itself — pick a different one", 'error');
+                        return;
+                    }
+                    openCompareLightbox(currentItem.id, item.id);
+                    return;
+                }
                 lightboxState.index = idx;
                 renderLightboxImage();
             });
@@ -3134,10 +3229,10 @@ function openLightbox(batchItems, startIndex) {
 
     // ── LEFT side: Analysis Tool, SDR Slider, SDR Toggle, Save ──
     // ── RIGHT side: Edit, Copy Link | separator | Delete, Delete All ──
-    const { detailsBtn, compareBtn, sdrToggleBtn, editBtn, deleteBtn, sep2 } =
+    const { detailsBtn, compareBtn, sdrToggleBtn, pickCompareBtn, editBtn, deleteBtn, sep2 } =
         _setupToolbarButtons(toolbarLeft, toolbarRight, copyLinkBtn);
 
-    _setupImageInteraction(overlay, imageWrapper, imgContainer, imgEl, imageArea, filmstrip, imageHeaderRight, imageHeaderSubtitle, imageHeaderTags, imageHeaderTitle, prevBtn, nextBtn, toolbar, compareBtn, sdrToggleBtn, editBtn, deleteBtn, sep2);
+    _setupImageInteraction(overlay, imageWrapper, imgContainer, imgEl, imageArea, filmstrip, imageHeaderRight, imageHeaderSubtitle, imageHeaderTags, imageHeaderTitle, prevBtn, nextBtn, toolbar, compareBtn, sdrToggleBtn, pickCompareBtn, editBtn, deleteBtn, sep2);
 }
 
 // Keyed by sdrUrl — holds hidden Image objects to keep SDR images in the browser cache.
@@ -3190,6 +3285,7 @@ function closeLightbox() {
     if (lightboxState.compareTargetItem) {
         lightboxState.compareTargetItem = null;
     }
+    lightboxState.pickerMode = false;
     const overlay = document.getElementById('lightbox-overlay');
     if (overlay) {
         if (overlay._cleanupMouseUp) document.removeEventListener('mouseup', overlay._cleanupMouseUp);
@@ -3355,6 +3451,24 @@ function showStatusMessage(message, type = 'info') {
             statusMessage.style.color = '#bbb';
         }, 3000);
     }
+}
+
+// Status message that renders inside the lightbox overlay itself (above the
+// filmstrip), for cases where showStatusMessage's target element is hidden
+// behind the lightbox. No-ops harmlessly if the lightbox isn't open.
+let _lightboxToastTimer = null;
+function _showLightboxToast(message, type = 'error') {
+    const overlay = document.getElementById('lightbox-overlay');
+    const toast = overlay?._toast;
+    if (!toast) return;
+    toast.textContent = message;
+    toast.classList.remove('lightbox-toast--error', 'lightbox-toast--success', 'lightbox-toast--info');
+    toast.classList.add(`lightbox-toast--${type}`);
+    toast.classList.add('lightbox-toast--visible');
+    clearTimeout(_lightboxToastTimer);
+    _lightboxToastTimer = setTimeout(() => {
+        toast.classList.remove('lightbox-toast--visible');
+    }, 2500);
 }
 
 function showItemStatusMessage(infoSection, message, type = 'info') {
@@ -4470,9 +4584,21 @@ document.addEventListener('keydown', (e) => {
     // All shortcuts only active when lightbox is open
     if (!lightboxState.open) return;
 
-    // Escape: close lightbox
+    // Escape: cancel "compare with..." picker if active, otherwise close lightbox
     if (e.key === 'Escape') {
         e.preventDefault();
+        if (lightboxState.pickerMode) {
+            lightboxState.pickerMode = false;
+            const pickBtn = document.querySelector('.js-pick-compare-btn');
+            if (pickBtn) {
+                pickBtn.classList.remove('button-active');
+                pickBtn.title = 'Compare with another image';
+                pickBtn.dataset.tooltip = pickBtn.title;
+            }
+            const fs = document.querySelector('.lightbox-filmstrip');
+            if (fs) fs.classList.remove('lightbox-filmstrip-picking');
+            return;
+        }
         closeLightbox();
         return;
     }
