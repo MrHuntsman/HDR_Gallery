@@ -201,3 +201,31 @@ async function isAdmin() {
     const uid = await _getUid();
     return uid === _ADMIN_UID;
 }
+
+// ── Comparisons ────────────────────────────────────────────────────────────────
+// A comparison is a lightweight pointer doc — { image1Id, image2Id, created } —
+// referencing two existing docs in the `images` collection. It doesn't duplicate
+// image data, so editing/deleting the underlying images doesn't require touching
+// comparison docs (a dangling reference is filtered out at render time instead).
+const _compCol = _db.collection('comparisons');
+
+// Creates a comparison entry from two existing image IDs. Returns the new doc ID.
+async function addComparison(image1Id, image2Id) {
+    const ref = await _compCol.add({
+        image1Id,
+        image2Id,
+        created: Date.now(),
+    });
+    return ref.id;
+}
+
+// Returns all comparison documents, oldest first — same ordering convention as
+// getAllImageFiles(). Each object has { id, image1Id, image2Id, created }.
+async function getAllComparisons() {
+    const snap = await _compCol.orderBy('created', 'asc').get();
+    return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+}
+
+async function deleteComparison(id) {
+    await _compCol.doc(id).delete();
+}

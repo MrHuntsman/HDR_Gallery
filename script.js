@@ -122,15 +122,15 @@ async function _showGameBanner(gameName) {
 // ─── HDR Types ────────────────────────────────────────────────────────────────
 
 const HDR_TYPES = [
-    { id: 'renodx',        label: 'RenoDX',          group: 'Real HDR' },
-    { id: 'luma',          label: 'Luma',             group: 'Real HDR' },
-    { id: 'native',        label: 'Native',           group: 'Real HDR' },
-    { id: 'specialk',      label: 'SpecialK',         group: 'Inverse Tonemapping' },
+    { id: 'renodx',        label: 'RenoDX HDR',          group: 'Real HDR' },
+    { id: 'luma',          label: 'Luma HDR',             group: 'Real HDR' },
+    { id: 'native',        label: 'Native HDR',           group: 'Real HDR' },
+    { id: 'specialk',      label: 'SpecialK HDR',         group: 'Inverse Tonemapping' },
     { id: 'rtxHdr',        label: 'RTX HDR',          group: 'Inverse Tonemapping' },
     { id: 'autoHdr',       label: 'Windows Auto HDR', group: 'Inverse Tonemapping' },
     { id: 'dxvk',          label: 'DXVK HDR',         group: 'Inverse Tonemapping' },
-    { id: 'pumboReshade',  label: 'Pumbo ReShade',    group: 'Inverse Tonemapping' },
-    { id: 'liliumReshade', label: 'Lilium ReShade',   group: 'Inverse Tonemapping' },
+    { id: 'pumboReshade',  label: 'Pumbo ReShade HDR',    group: 'Inverse Tonemapping' },
+    { id: 'liliumReshade', label: 'Lilium ReShade HDR',   group: 'Inverse Tonemapping' },
 ];
 
 // ─── Active Filters ───────────────────────────────────────────────────────────
@@ -803,6 +803,11 @@ async function refreshGallery() {
     try {
         const imageFiles = await getAllImageFiles();
         const _admin = await isAdmin();
+        _cachedIsAdmin = _admin; // synchronous read for rebuildFilmstrip, etc.
+        // Kept unfiltered (includes hidden images) so comparisons can resolve
+        // their two images regardless of hidden status — a comparison is
+        // meant to be public even if one side is hidden from the main grid.
+        _allImageFilesById = new Map(imageFiles.map(it => [it.id, it]));
         _allGalleryItems = imageFiles.slice().reverse().filter(item => !item.hidden || _admin);
 
         // Rebuild search bar with fresh game names (after import / delete / edit)
@@ -812,11 +817,44 @@ async function refreshGallery() {
 
         buildGalleryCards(_allGalleryItems);
         renderGallery(_allGalleryItems);
+        await refreshComparisons();
     } catch (error) {
         statusMessage.textContent = 'Error loading gallery. Please refresh the page.';
         console.error('Gallery refresh error:', error);
     }
 }
+let _allImageFilesById = new Map();
+let _cachedIsAdmin = false;
+
+// ── Comparisons ──────────────────────────────────────────────────────────────
+// Comparison entries don't get their own gallery section — they show up as an
+// extra thumbnail in the lightbox filmstrip (see rebuildFilmstrip), right after
+// the normal images, so browsing a game's images and comparing two of them
+// feels like one continuous flow instead of a separate destination.
+let _allComparisons = [];
+
+async function refreshComparisons() {
+    try {
+        const comparisons = await getAllComparisons();
+        // Resolve against the unfiltered image lookup (not the visibility-
+        // filtered _allGalleryItems) so a comparison stays visible to every
+        // viewer even if one/both of its images are hidden from the main
+        // grid — the comparison is its own public entry point. Still drops
+        // any comparison whose image was actually deleted rather than
+        // showing a broken thumbnail.
+        _allComparisons = comparisons
+            .map(c => ({ ...c, image1: _allImageFilesById.get(c.image1Id), image2: _allImageFilesById.get(c.image2Id) }))
+            .filter(c => c.image1 && c.image2);
+        // If a lightbox is currently open, refresh its filmstrip so a newly
+        // saved comparison appears immediately without closing/reopening.
+        if (lightboxState.open && typeof window._rebuildFilmstrip === 'function') {
+            window._rebuildFilmstrip();
+        }
+    } catch (err) {
+        console.error('[comparisons] refresh failed:', err);
+    }
+}
+
 
 // ─── Collage Card (gallery view) ─────────────────────────────────────────────
 
@@ -1092,8 +1130,8 @@ function _setupFilmstrip(overlay) {
 // on whether a compare target is active ("Compare") or not ("SDR Slider").
 function _compareBtnIconHTML() {
     return lightboxState.compareTargetItem
-        ? '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12H3"/><path d="m7 8-4 4 4 4"/><path d="m17 8 4 4-4 4"/></svg><span class="btn-label"> Compare</span>'
-        : '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12H3"/><path d="m7 8-4 4 4 4"/><path d="m17 8 4 4-4 4"/></svg><span class="btn-label"> <u>S</u>DR Slider</span>';
+        ? '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v16"/><path d="M3 12h5"/><path d="m5 9-3 3 3 3"/><path d="M21 12h-5"/><path d="m19 9 3 3-3 3"/></svg><span class="btn-label"> Compare</span>'
+        : '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v16"/><path d="M3 12h5"/><path d="m5 9-3 3 3 3"/><path d="M21 12h-5"/><path d="m19 9 3 3-3 3"/></svg><span class="btn-label"> <u>S</u>DR Slider</span>';
 }
 
 // Builds the lightbox toolbar buttons: Analysis Tool + separator + Compare/SDR
@@ -1127,8 +1165,8 @@ function _setupToolbarButtons(toolbarLeft, toolbarRight, copyLinkBtn) {
     compareBtn.title = lightboxState.compareTargetItem ? 'Compare Slider (S)' : 'SDR Slider (S)';
     compareBtn.dataset.tooltip = compareBtn.title;
     compareBtn.innerHTML = lightboxState.compareTargetItem
-        ? '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12H3"/><path d="m7 8-4 4 4 4"/><path d="m17 8 4 4-4 4"/></svg><span class="btn-label"> Compare</span>'
-        : '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12H3"/><path d="m7 8-4 4 4 4"/><path d="m17 8 4 4-4 4"/></svg><span class="btn-label"> <u>S</u>DR Slider</span>';
+        ? '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v16"/><path d="M3 12h5"/><path d="m5 9-3 3 3 3"/><path d="M21 12h-5"/><path d="m19 9 3 3-3 3"/></svg><span class="btn-label"> Compare</span>'
+        : '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v16"/><path d="M3 12h5"/><path d="m5 9-3 3 3 3"/><path d="M21 12h-5"/><path d="m19 9 3 3-3 3"/></svg><span class="btn-label"> <u>S</u>DR Slider</span>';
     toolbarLeft.appendChild(compareBtn);
 
     const sdrToggleBtn = document.createElement('div');
@@ -1148,11 +1186,43 @@ function _setupToolbarButtons(toolbarLeft, toolbarRight, copyLinkBtn) {
     pickCompareBtn.className = 'button-secondary js-pick-compare-btn';
     pickCompareBtn.title = 'Compare with another image';
     pickCompareBtn.dataset.tooltip = 'Compare with another image';
-    pickCompareBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="13" height="13" rx="2"/><path d="M9 7V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v13a2 2 0 0 1-2 2h-3"/></svg><span class="btn-label"> Compare with…</span>';
-    // Hidden when we're already in a two-image compare (compareTargetItem set) —
-    // picking a third image isn't supported, avoid a confusing double-compare state.
-    if (lightboxState.compareTargetItem) pickCompareBtn.style.display = 'none';
+    pickCompareBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="18" rx="2"/><path d="M12 3v18"/></svg><span class="btn-label"> Compare with…</span>';
+    // Admin-only feature — hidden by default, revealed once isAdmin() resolves true.
+    pickCompareBtn.style.display = 'none';
+    isAdmin().then(admin => {
+        if (admin && !lightboxState.compareTargetItem) pickCompareBtn.style.display = '';
+    });
     toolbarLeft.appendChild(pickCompareBtn);
+
+    const saveComparisonBtn = document.createElement('button');
+    saveComparisonBtn.className = 'button-secondary js-save-comparison-btn';
+    saveComparisonBtn.title = 'Save as comparison';
+    saveComparisonBtn.dataset.tooltip = 'Save as comparison';
+    saveComparisonBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/><path d="M17 21v-8H7v8"/><path d="M7 3v5h8"/></svg><span class="btn-label"> Save as comparison</span>';
+    // Only meaningful during an active two-image compare, and admin-only.
+    saveComparisonBtn.style.display = 'none';
+    if (lightboxState.compareTargetItem) {
+        isAdmin().then(admin => {
+            if (admin && lightboxState.compareTargetItem) saveComparisonBtn.style.display = '';
+        });
+    }
+    saveComparisonBtn.onclick = async () => {
+        const currentItem = lightboxState.batch[lightboxState.index];
+        const targetItem = lightboxState.compareTargetItem;
+        if (!currentItem || !targetItem) return;
+        saveComparisonBtn.disabled = true;
+        try {
+            await addComparison(currentItem.id, targetItem.id);
+            _showLightboxToast('Comparison saved', 'success');
+            if (typeof refreshComparisons === 'function') refreshComparisons();
+        } catch (err) {
+            console.error('[comparison] save failed:', err);
+            _showLightboxToast('Failed to save comparison', 'error');
+        } finally {
+            saveComparisonBtn.disabled = false;
+        }
+    };
+    toolbarLeft.appendChild(saveComparisonBtn);
 
     const sep1 = document.createElement('div');
     sep1.className = 'toolbar-separator';
@@ -1362,7 +1432,26 @@ async function openCompareLightbox(id1, id2) {
         }
     }
     lightboxState.compareTargetItem = item2;
-    openLightbox([item1], 0);
+    // Scope the filmstrip to item1's game section (same as the ?img= deep link)
+    // instead of a single-item batch — otherwise opening via a ?compare= URL
+    // strands the user with only the comparison and no way to browse the rest
+    // of that game's screenshots.
+    const _visibleItems = applyFilters(_allGalleryItems);
+    const _gameItems = item1.gameName
+        ? _visibleItems.filter(it => it.gameName === item1.gameName)
+        : _visibleItems.filter(it => !it.gameName);
+    let _startIdx = _gameItems.findIndex(it => it.id === item1.id);
+    let _batch;
+    if (_startIdx !== -1) {
+        _batch = _gameItems;
+    } else {
+        // item1 isn't in this viewer's visible set (e.g. hidden) — still give
+        // them the rest of the game's screenshots as context instead of
+        // stranding them with only the comparison, by including it explicitly.
+        _batch = [item1, ..._gameItems];
+        _startIdx = 0;
+    }
+    openLightbox(_batch, Math.max(0, _startIdx));
     if (lightboxState.blobUrls) {
         lightboxState.blobUrls.set(item2.id, {
             url: item2.thumbUrl || item2.hdrUrl,
@@ -2205,6 +2294,33 @@ function _setupImageInteraction(overlay, imageWrapper, imgContainer, imgEl, imag
         }
         filmstrip.classList.remove('lightbox-filmstrip-picking');
 
+        // Compare-mode toolbar chrome — built once in _setupToolbarButtons(), but
+        // compareTargetItem can now change in place (filmstrip clicks) without
+        // rebuilding the toolbar, so keep these in sync on every render instead.
+        const _comparing = !!lightboxState.compareTargetItem;
+        compareBtn.innerHTML = _compareBtnIconHTML();
+        compareBtn.title = _comparing ? 'Compare Slider (S)' : 'SDR Slider (S)';
+        compareBtn.dataset.tooltip = compareBtn.title;
+        sdrToggleBtn.title = _comparing ? 'Swap compared images (D)' : 'SDR Toggle (D)';
+        sdrToggleBtn.dataset.tooltip = sdrToggleBtn.title;
+        sdrToggleBtn.innerHTML = _comparing
+            ? '<span class="sdr-pill-seg sdr-pill-seg--active" data-seg="image1">Image 1</span><span class="sdr-pill-seg" data-seg="image2">Image 2</span>'
+            : '<span class="sdr-pill-seg" data-seg="sdr">SDR</span><span class="sdr-pill-seg sdr-pill-seg--active" data-seg="hdr">HDR</span>';
+        if (pickBtnEl) {
+            isAdmin().then(admin => {
+                pickBtnEl.style.display = (admin && !_comparing) ? '' : 'none';
+            });
+        }
+        const saveComparisonBtnEl = toolbar.querySelector('.js-save-comparison-btn');
+        if (saveComparisonBtnEl) {
+            saveComparisonBtnEl.style.display = 'none';
+            if (_comparing) {
+                isAdmin().then(admin => {
+                    saveComparisonBtnEl.style.display = admin ? '' : 'none';
+                });
+            }
+        }
+
         // Update the page URL so this image has a shareable link. If we're in
         // compare mode (compareTargetItem set — either from a ?compare= deep
         // link or from just picking a second image via the filmstrip), the URL
@@ -2397,9 +2513,20 @@ function _setupImageInteraction(overlay, imageWrapper, imgContainer, imgEl, imag
             imageHeaderRight.appendChild(badge);
         }
 
-        // Update filmstrip active state
-        filmstrip.querySelectorAll('.lightbox-filmstrip-item').forEach((item, i) => {
-            item.classList.toggle('lightbox-filmstrip-thumb-active', i === lightboxState.index);
+        // Update filmstrip active state. Scoped to normal-image thumbs only
+        // (:not(...comparison)) since they're positioned first in the filmstrip —
+        // indexing into the full NodeList (including comparison thumbs, appended
+        // after) would misalign against lightboxState.index. Also gated on
+        // !compareTargetItem so entering compare mode doesn't leave the old
+        // "primary image" thumb looking active alongside the comparison thumb.
+        const _comparingNow = !!lightboxState.compareTargetItem;
+        filmstrip.querySelectorAll('.lightbox-filmstrip-item:not(.lightbox-filmstrip-item-comparison)').forEach((thumbItem, i) => {
+            thumbItem.classList.toggle('lightbox-filmstrip-thumb-active', i === lightboxState.index && !_comparingNow);
+        });
+        filmstrip.querySelectorAll('.lightbox-filmstrip-item-comparison').forEach(thumbItem => {
+            const _pairKey = _comparingNow ? `${item.id}|${lightboxState.compareTargetItem.id}` : null;
+            const _isThis = _comparingNow && (thumbItem._comparisonPairId === _pairKey || thumbItem._comparisonPairIdRev === _pairKey);
+            thumbItem.classList.toggle('lightbox-filmstrip-thumb-active', _isThis);
         });
         // Scroll active thumbnail into view (touch / keyboard navigation)
         requestAnimationFrame(() => {
@@ -2417,11 +2544,32 @@ function _setupImageInteraction(overlay, imageWrapper, imgContainer, imgEl, imag
         editBtn.style.display       = 'none';
         sep2.style.display          = 'none';
         deleteBtn.style.display     = 'none';
-        isCurrentUserOwner(item).then(isOwner => {
-            editBtn.style.display      = isOwner ? '' : 'none';
-            sep2.style.display         = isOwner ? '' : 'none';
-            deleteBtn.style.display    = isOwner ? '' : 'none';
-        });
+        if (lightboxState.compareTargetItem) {
+            // In compare mode, delete repurposes into "remove this comparison entry"
+            // (admin-only, doesn't touch the images) rather than image ownership.
+            const target = lightboxState.compareTargetItem;
+            deleteBtn.classList.add('button-danger--comparison');
+            deleteBtn.title = 'Remove comparison';
+            deleteBtn.dataset.tooltip = 'Remove comparison';
+            deleteBtn.querySelector('.btn-label').textContent = ' Remove comparison';
+            isAdmin().then(admin => {
+                const comp = _allComparisons.find(c =>
+                    (c.image1Id === item.id && c.image2Id === target.id) ||
+                    (c.image1Id === target.id && c.image2Id === item.id));
+                deleteBtn.style.display = (admin && comp) ? '' : 'none';
+                sep2.style.display = (admin && comp) ? '' : 'none';
+            });
+        } else {
+            deleteBtn.classList.remove('button-danger--comparison');
+            deleteBtn.title = 'Delete image';
+            deleteBtn.dataset.tooltip = 'Delete';
+            deleteBtn.querySelector('.btn-label').textContent = ' Delete';
+            isCurrentUserOwner(item).then(isOwner => {
+                editBtn.style.display      = isOwner ? '' : 'none';
+                sep2.style.display         = isOwner ? '' : 'none';
+                deleteBtn.style.display    = isOwner ? '' : 'none';
+            });
+        }
 
         // Start pixel decode only if analysis tool is active
         if (globalDetailsEnabled) _startPixelDecode(item);
@@ -2482,6 +2630,24 @@ function _setupImageInteraction(overlay, imageWrapper, imgContainer, imgEl, imag
         };
 
         deleteBtn.onclick = async () => {
+            if (lightboxState.compareTargetItem) {
+                const target = lightboxState.compareTargetItem;
+                const comp = _allComparisons.find(c =>
+                    (c.image1Id === item.id && c.image2Id === target.id) ||
+                    (c.image1Id === target.id && c.image2Id === item.id));
+                if (!comp) return; // not a saved comparison (e.g. an ad-hoc manual compare) — nothing to remove
+                if (!confirm('Remove this comparison entry? The images themselves won\'t be deleted.')) return;
+                try {
+                    await deleteComparison(comp.id);
+                    _showLightboxToast('Comparison removed', 'success');
+                    closeLightbox();
+                    await refreshGallery();
+                } catch (err) {
+                    console.error('[comparisons] delete failed:', err);
+                    _showLightboxToast('Failed to remove comparison', 'error');
+                }
+                return;
+            }
             if (!confirm(`Delete "${item.name}"?`)) return;
             try {
                 await deleteImageFile(item.id);
@@ -2926,16 +3092,101 @@ function _setupImageInteraction(overlay, imageWrapper, imgContainer, imgEl, imag
         };
     } // end renderLightboxImage
 
+    // Closes the inline before/after comparison slider if one is open, restoring
+    // the plain image view underneath. Shared by compareBtn's own close click
+    // and the in-place compare-mode transitions below, which need to tear down
+    // a slider built for the *previous* pairing before rendering a new one.
+    function _closeInlineCompareSlider() {
+        const existingSlider = imageWrapper.querySelector('.inline-comparison-slider');
+        if (!existingSlider) return;
+        if (existingSlider._cleanup) existingSlider._cleanup();
+        existingSlider.remove();
+        lightboxState.sdrActive = false;
+        compareBtn.classList.remove('button-active');
+        compareBtn.innerHTML = _compareBtnIconHTML();
+        const metaOverlay = imageWrapper.querySelector('.image-meta-overlay');
+        if (metaOverlay) metaOverlay.style.visibility = '';
+        updateAllDetailButtons(globalDetailsEnabled);
+    }
+
+    // Switches into (or between) two-image compare mode without closing and
+    // reopening the lightbox overlay — just updates lightboxState and re-runs
+    // the same render/filmstrip functions the overlay already has. Whichever
+    // of the two images is already part of the open batch (or already being
+    // displayed) stays the "primary" (batch[index]) image so browsing context
+    // isn't lost; the other becomes compareTargetItem. If neither image is in
+    // the batch at all (e.g. both hidden from this viewer), pairA is inserted
+    // into the batch in place rather than falling back to a full reopen —
+    // every viewer gets the same seamless transition, not just admins who can
+    // already see every image.
+    function _enterCompareInPlace(pairA, pairB) {
+        const currentItem = lightboxState.batch[lightboxState.index];
+        let primaryIdx = -1;
+        let target;
+        if (currentItem && (currentItem.id === pairA.id || currentItem.id === pairB.id)) {
+            // Already viewing one side of this pair (common case — that's usually
+            // how the comparison thumb got into this filmstrip in the first
+            // place) — keep it as primary without needing a batch lookup, since
+            // it may be hidden and therefore absent from lightboxState.batch.
+            primaryIdx = lightboxState.index;
+            target = currentItem.id === pairA.id ? pairB : pairA;
+        } else {
+            primaryIdx = lightboxState.batch.findIndex(it => it.id === pairA.id);
+            target = pairB;
+            if (primaryIdx === -1) {
+                primaryIdx = lightboxState.batch.findIndex(it => it.id === pairB.id);
+                target = pairA;
+            }
+        }
+        if (primaryIdx === -1) {
+            lightboxState.batch = [pairA, ...lightboxState.batch];
+            primaryIdx = 0;
+            target = pairB;
+        }
+        _closeInlineCompareSlider();
+        lightboxState.index = primaryIdx;
+        lightboxState.compareTargetItem = target;
+        [lightboxState.batch[primaryIdx], target].forEach(it => {
+            if (lightboxState.blobUrls && !lightboxState.blobUrls.has(it.id)) {
+                lightboxState.blobUrls.set(it.id, {
+                    url: it.thumbUrl || it.hdrUrl,
+                    fullUrl: it.hdrUrl,
+                    blob: null,
+                    sdrUrl: it.sdrUrl || null,
+                });
+            }
+        });
+        renderLightboxImage();
+        rebuildFilmstrip();
+        // Auto-open the compare slider, matching openCompareLightbox's behavior.
+        setTimeout(() => {
+            if (lightboxState.compareTargetItem === target) compareBtn.click();
+        }, 50);
+    }
+
     // ── Filmstrip builder ──
     function rebuildFilmstrip() {
         filmstrip.innerHTML = '';
-        if (lightboxState.batch.length <= 1) return;
+        // Comparisons are matched by game, not by exact batch membership — a
+        // comparison's images may be hidden from the visitor's browsable batch
+        // (see refreshComparisons), but it should still show up alongside every
+        // other screenshot of that same game, for every viewer.
+        const _currentGameName = lightboxState.batch[lightboxState.index]?.gameName ?? null;
+        const _matchesCurrentGame = (comp) =>
+            (comp.image1.gameName ?? null) === _currentGameName || (comp.image2.gameName ?? null) === _currentGameName;
+        const _hasRelevantComparisons = _allComparisons.some(_matchesCurrentGame);
+        if (lightboxState.batch.length <= 1 && !_hasRelevantComparisons) return;
         lightboxState.batch.forEach((item, idx) => {
+            // A hidden image inserted into the batch just to keep the primary
+            // "currently displayed" slot (see _enterCompareInPlace / openCompare-
+            // Lightbox) shouldn't also get its own standalone filmstrip thumb for
+            // non-admins — it's already represented via the comparison thumb.
+            if (item.hidden && !_cachedIsAdmin) return;
             const { url } = lightboxState.blobUrls.get(item.id);
             const isSpoiler = item.spoiler && localStorage.getItem(`spoiler-revealed:${item.id}`) !== '1';
 
             const wrapper = document.createElement('div');
-            wrapper.className = 'lightbox-filmstrip-item' + (idx === lightboxState.index ? ' lightbox-filmstrip-thumb-active' : '');
+            wrapper.className = 'lightbox-filmstrip-item' + (idx === lightboxState.index && !lightboxState.compareTargetItem ? ' lightbox-filmstrip-thumb-active' : '');
 
             const thumb = document.createElement('img');
             thumb.src = url;
@@ -2970,15 +3221,82 @@ function _setupImageInteraction(overlay, imageWrapper, imgContainer, imgEl, imag
                         _showLightboxToast("Can't compare an image with itself — pick a different one", 'error');
                         return;
                     }
-                    openCompareLightbox(currentItem.id, item.id);
+                    _enterCompareInPlace(currentItem, item);
                     return;
                 }
+                // Selecting a normal image always exits compare mode in place —
+                // no picker armed, just browsing.
+                _closeInlineCompareSlider();
+                lightboxState.compareTargetItem = null;
                 lightboxState.index = idx;
                 renderLightboxImage();
+                rebuildFilmstrip();
+            });
+            filmstrip.appendChild(wrapper);
+        });
+
+        // Comparison entries involving any image in this batch — shown as extra
+        // thumbnails right after the normal images, not folded into the batch
+        // array itself (they're not navigable "next/prev" images, just a
+        // shortcut into the two-image compare view).
+        _allComparisons.filter(_matchesCurrentGame).forEach(comp => {
+            const isActiveCompare = lightboxState.compareTargetItem
+                && lightboxState.batch[lightboxState.index]
+                && ((lightboxState.batch[lightboxState.index].id === comp.image1Id && lightboxState.compareTargetItem.id === comp.image2Id)
+                    || (lightboxState.batch[lightboxState.index].id === comp.image2Id && lightboxState.compareTargetItem.id === comp.image1Id));
+
+            const wrapper = document.createElement('div');
+            wrapper.className = 'lightbox-filmstrip-item lightbox-filmstrip-item-comparison' + (isActiveCompare ? ' lightbox-filmstrip-thumb-active' : '');
+            wrapper.title = 'Comparison';
+            // Tag with the pair id (order-independent) so renderLightboxImage's
+            // active-thumb sync can find this element without rebuilding the
+            // whole filmstrip — see the `_comparisonPairId` check there.
+            wrapper._comparisonPairId = `${comp.image1Id}|${comp.image2Id}`;
+            wrapper._comparisonPairIdRev = `${comp.image2Id}|${comp.image1Id}`;
+
+            const thumb1 = document.createElement('img');
+            thumb1.src = comp.image1.thumbUrl || comp.image1.hdrUrl;
+            thumb1.alt = `${comp.image1.name} vs ${comp.image2.name}`;
+            thumb1.className = 'lightbox-filmstrip-thumb lightbox-filmstrip-thumb-split lightbox-filmstrip-thumb-split-left';
+            wrapper.appendChild(thumb1);
+
+            // Match normal thumbnails' sizing behavior (fixed 56px height, width
+            // auto from the source image's aspect ratio) — our split thumb uses
+            // absolutely-positioned images so it can't size itself the same way
+            // CSS width:auto would, hence doing it manually off image1's natural
+            // dimensions once known.
+            const _sizeCompareThumb = () => {
+                if (thumb1.naturalWidth && thumb1.naturalHeight) {
+                    wrapper.style.width = (56 * thumb1.naturalWidth / thumb1.naturalHeight) + 'px';
+                }
+            };
+            if (thumb1.complete) _sizeCompareThumb();
+            else thumb1.addEventListener('load', _sizeCompareThumb, { once: true });
+
+            const thumb2 = document.createElement('img');
+            thumb2.src = comp.image2.thumbUrl || comp.image2.hdrUrl;
+            thumb2.alt = '';
+            thumb2.className = 'lightbox-filmstrip-thumb lightbox-filmstrip-thumb-split lightbox-filmstrip-thumb-split-right';
+            wrapper.appendChild(thumb2);
+
+            const divider = document.createElement('span');
+            divider.className = 'lightbox-filmstrip-thumb-split-divider';
+            wrapper.appendChild(divider);
+
+            const badge = document.createElement('span');
+            badge.className = 'lightbox-filmstrip-comparison-badge';
+            badge.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v16"></path><path d="M3 12h5"></path><path d="m5 9-3 3 3 3"></path><path d="M21 12h-5"></path><path d="m19 9 3 3-3 3"></path></svg>';
+            wrapper.appendChild(badge);
+
+            wrapper.addEventListener('click', (e) => {
+                e.stopPropagation();
+                _enterCompareInPlace(comp.image1, comp.image2);
             });
             filmstrip.appendChild(wrapper);
         });
     }
+
+    window._rebuildFilmstrip = rebuildFilmstrip;
 
     rebuildFilmstrip();
     // Scroll active thumb into view after layout — block:nearest avoids moving the page vertically
