@@ -1614,7 +1614,7 @@ async function analyze16BitPNG(blob) {
 }
 
 // ─── PNG Metadata Parser ──────────────────────────────────────────────────────
-// Reads HDR-relevant PNG chunks: IHDR, cICP, gAMA, cHRM, iCCP, cLLi, mDCv.
+// Reads HDR-relevant PNG chunks: IHDR, cICP, gAMA, cHRM, iCCP, cLLI, mDCV.
 async function parsePNGMetadata(blob) {
     try {
         const arrayBuffer = await blob.arrayBuffer();
@@ -1651,11 +1651,11 @@ async function parsePNGMetadata(blob) {
                 cicpFullRange          = data[offset + 11];
             } else if (type === 'iCCP') {
                 hasICCP = true;
-            } else if (type === 'cLLi' && length >= 8) {
+            } else if (type === 'cLLI' && length >= 8) {
                 // Content Light Level: MaxCLL and MaxFALL in cd/m²
                 maxCLL  = (data[offset+8] <<24|data[offset+9] <<16|data[offset+10]<<8|data[offset+11]) >>> 0;
                 maxFALL = (data[offset+12]<<24|data[offset+13]<<16|data[offset+14]<<8|data[offset+15]) >>> 0;
-            } else if (type === 'mDCv' && length >= 24) {
+            } else if (type === 'mDCV' && length >= 24) {
                 // Mastering Display Color Volume: max/min luminance in units of 0.0001 cd/m²
                 const base = offset + 8 + 20; // skip 20 bytes of display primaries
                 maxLuminance = ((data[base]  <<24|data[base+1]<<16|data[base+2]<<8|data[base+3]) >>> 0) / 10000;
